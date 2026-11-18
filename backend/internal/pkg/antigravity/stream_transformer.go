@@ -348,6 +348,7 @@ func (p *StreamingProcessor) processText(text, signature string) []byte {
 
 	// 非空 text 带签名 - 特殊处理
 	if signature != "" {
+		p.hasContent = true
 		_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
 			"type": "text",
 			"text": "",
@@ -520,6 +521,7 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []byte {
 			GroundingChunks:  p.groundingChunks,
 		})
 		if groundingText != "" {
+			p.hasContent = true
 			_, _ = result.Write(p.startBlock(BlockTypeText, map[string]any{
 				"type": "text",
 				"text": "",

@@ -755,3 +755,92 @@ func TestTransformClaudeToGemini_ToolResultImagesReachUpstream(t *testing.T) {
 	require.Equal(t, "image/jpeg", userParts[3].InlineData.MimeType)
 	require.Equal(t, "d29ybGQ=", userParts[3].InlineData.Data)
 }
+
+func TestApplyGeminiReasoningMinMaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		model     string
+		maxTokens int
+		want      int
+	}{
+		{model: "gemini-2.5-flash", maxTokens: -1, want: -1},
+		{model: "gemini-2.5-flash", maxTokens: 0, want: 0},
+		{model: "gemini-2.5-flash", maxTokens: 1, want: 1},
+		{model: "gemini-2.5-flash", maxTokens: 64, want: 64},
+		{model: "gemini-3.1-flash-image", maxTokens: 64, want: 64},
+		{model: "claude-opus-4-6-thinking", maxTokens: 64, want: 64},
+		{model: "gemini-4-hydrogen", maxTokens: -5, want: -5},
+		{model: "gemini-4-hydrogen", maxTokens: 0, want: 0},
+		{model: "gemini-4-hydrogen", maxTokens: 1, want: 256},
+		{model: "gemini-4-hydrogen", maxTokens: 8, want: 256},
+		{model: "gemini-4-hydrogen", maxTokens: 9, want: 1024},
+		{model: "gemini-4-hydrogen-medium", maxTokens: 64, want: 1024},
+		{model: "gemini-4-carbon-high", maxTokens: 1023, want: 1024},
+		{model: "gemini-3.8-flash", maxTokens: 1024, want: 1024},
+		{model: "gemini-2.5-pro", maxTokens: 4096, want: 4096},
+	}
+
+	for _, tt := range tests {
+		got := ApplyGeminiReasoningMinMaxOutputTokens(tt.model, tt.maxTokens)
+		require.Equal(t, tt.want, got, "model=%s maxTokens=%d", tt.model, tt.maxTokens)
+	}
+}
+
+func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testing.T) {
+	temp := 0.7
+	topP := 0.9
+	topK := 40
+
+	t.Run("reasoning models omit stopSequences and sampling params and floor small max_tokens", func(t *testing.T) {
+		for _, model := range []string{"gemini-4-hydrogen", "gemini-4-carbon-medium", "gemini-3.8-flash"} {
+			cfgProbe := buildGenerationConfig(&ClaudeRequest{
+				Model:       model,
+				MaxTokens:   1,
+				Temperature: &temp,
+				TopP:        &topP,
+				TopK:        &topK,
+			})
+			require.Equal(t, 256, cfgProbe.MaxOutputTokens)
+			require.Empty(t, cfgProbe.StopSequences)
+			require.Nil(t, cfgProbe.Temperature)
+			require.Nil(t, cfgProbe.TopP)
+			require.Nil(t, cfgProbe.TopK)
+
+			cfgLight := buildGenerationConfig(&ClaudeRequest{
+				Model:     model,
+				MaxTokens: 64,
+				Thinking:  &ThinkingConfig{Type: "enabled"},
+			})
+			require.Equal(t, 1024, cfgLight.MaxOutputTokens)
+			require.NotNil(t, cfgLight.ThinkingConfig)
+			require.Equal(t, -1, cfgLight.ThinkingConfig.ThinkingBudget)
+		}
+	})
+
+	t.Run("explicit positive budget larger than 1024 preserves budget+padding", func(t *testing.T) {
+		cfg := buildGenerationConfig(&ClaudeRequest{
+			Model:     "gemini-4-hydrogen-high",
+			MaxTokens: 64,
+			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 2048},
+		})
+		require.Equal(t, 2048+MaxTokensBudgetPadding, cfg.MaxOutputTokens)
+		require.Greater(t, cfg.MaxOutputTokens, cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("small positive budget with max_tokens > budget still floors to 1024", func(t *testing.T) {
+		cfg := buildGenerationConfig(&ClaudeRequest{
+			Model:     "gemini-4-hydrogen-low",
+			MaxTokens: 500,
+			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 200},
+		})
+		require.Equal(t, 1024, cfg.MaxOutputTokens)
+		require.Greater(t, cfg.MaxOutputTokens, cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("default and upper bound remain respected", func(t *testing.T) {
+		cfgDefault := buildGenerationConfig(&ClaudeRequest{Model: "gemini-4-hydrogen"})
+		require.Equal(t, defaultMaxOutputTokens, cfgDefault.MaxOutputTokens)
+
+		cfgOver := buildGenerationConfig(&ClaudeRequest{Model: "gemini-4-hydrogen", MaxTokens: 90000})
+		require.Equal(t, maxOutputTokensUpperBound, cfgOver.MaxOutputTokens)
+	})
+}

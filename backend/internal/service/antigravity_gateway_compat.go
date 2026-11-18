@@ -317,6 +317,10 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 		if err != nil {
 			return nil, err
 		}
+		body, err = floorAntigravityCompatGeminiMaxOutputTokens(body, mappedModel)
+		if err != nil {
+			return nil, err
+		}
 		body, err = enableMixedGeminiToolInvocations(body)
 		if err != nil {
 			return nil, err
@@ -335,6 +339,22 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	options := s.getClaudeTransformOptions(ctx)
 	options.EnableIdentityPatch = true
 	return antigravity.TransformClaudeToGeminiWithOptions(claudeRequest, projectID, mappedModel, options)
+}
+
+func floorAntigravityCompatGeminiMaxOutputTokens(body []byte, mappedModel string) ([]byte, error) {
+	maxTokensResult := gjson.GetBytes(body, "generationConfig.maxOutputTokens")
+	if !maxTokensResult.Exists() || maxTokensResult.Type != gjson.Number {
+		return body, nil
+	}
+	curMax := int(maxTokensResult.Int())
+	if curMax <= 0 || float64(curMax) != maxTokensResult.Float() {
+		return body, nil
+	}
+	floored := antigravity.ApplyGeminiReasoningMinMaxOutputTokens(mappedModel, curMax)
+	if floored <= curMax {
+		return body, nil
+	}
+	return sjson.SetBytes(body, "generationConfig.maxOutputTokens", floored)
 }
 
 // enableMixedGeminiToolInvocations reconciles Antigravity v1internal tool payloads.

@@ -285,8 +285,16 @@ func FallbackGeminiModel(model string) GeminiModel {
 
 // IsGeminiReasoningModel 判断是否为不支持参数和强制 ToolConfig 的 Gemini 推理模型
 func IsGeminiReasoningModel(modelID string) bool {
-	lowerID := strings.ToLower(modelID)
-	if strings.Contains(lowerID, "gemini-pro-agent") || strings.Contains(lowerID, "gemini-4-argon") {
+	lowerID := strings.TrimSpace(strings.ToLower(modelID))
+	lowerID = strings.TrimPrefix(lowerID, "models/")
+	if strings.Contains(lowerID, "image") {
+		return false
+	}
+	if strings.HasPrefix(lowerID, "gemini-4-") ||
+		strings.HasPrefix(lowerID, "gemini-3.") ||
+		strings.HasPrefix(lowerID, "gemini-3-") ||
+		strings.Contains(lowerID, "gemini-2.5-pro") ||
+		strings.Contains(lowerID, "gemini-pro-agent") {
 		return true
 	}
 	for _, m := range geminiModels {

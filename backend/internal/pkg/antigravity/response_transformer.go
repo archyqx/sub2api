@@ -193,8 +193,9 @@ func (p *NonStreamingProcessor) processPart(part *GeminiPart) {
 				p.trailingSignature = ""
 			}
 
-			// 非空 text 带签名 - 特殊处理：先输出 text，再输出空 thinking 块
+			// 非空 text 带签名 - 特殊处理：先输出此前累积的普通文本，再输出当前 text 和空 thinking 块
 			if signature != "" {
+				p.flushText()
 				p.contentBlocks = append(p.contentBlocks, ClaudeContentItem{
 					Type: "text",
 					Text: part.Text,

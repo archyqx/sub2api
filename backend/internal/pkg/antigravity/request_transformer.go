@@ -676,10 +676,28 @@ func extractToolResultInlineParts(content json.RawMessage) []GeminiPart {
 
 // buildGenerationConfig 构建 generationConfig
 const (
-	defaultMaxOutputTokens    = 64000
-	maxOutputTokensUpperBound = 65000
-	maxOutputTokensClaude     = 64000
+	defaultMaxOutputTokens               = 64000
+	maxOutputTokensUpperBound            = 65000
+	maxOutputTokensClaude                = 64000
+	geminiReasoningProbeMaxTokensCeiling = 8
+	geminiReasoningProbeMinOutputTokens  = 256
+	geminiReasoningMinOutputTokens       = 1024
 )
+
+// ApplyGeminiReasoningMinMaxOutputTokens 为强制隐藏思考的 Gemini 推理模型温和托底小正数 max_tokens，
+// 避免 thoughtsTokenCount 耗尽共享的 generationConfig.maxOutputTokens 导致零可见文本触发流式 502。
+func ApplyGeminiReasoningMinMaxOutputTokens(model string, maxTokens int) int {
+	if !IsGeminiReasoningModel(model) || maxTokens <= 0 {
+		return maxTokens
+	}
+	if maxTokens <= geminiReasoningProbeMaxTokensCeiling {
+		return geminiReasoningProbeMinOutputTokens
+	}
+	if maxTokens < geminiReasoningMinOutputTokens {
+		return geminiReasoningMinOutputTokens
+	}
+	return maxTokens
+}
 
 func maxOutputTokensLimit(model string) int {
 	if strings.HasPrefix(model, "claude-") {
@@ -744,6 +762,10 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 			}
 		}
 		config.ThinkingConfig.ThinkingBudget = budget
+	}
+
+	if isReasoning {
+		config.MaxOutputTokens = ApplyGeminiReasoningMinMaxOutputTokens(req.Model, config.MaxOutputTokens)
 	}
 
 	if config.MaxOutputTokens > maxLimit {
