@@ -883,7 +883,11 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 		return false
 	}
 	keys := antigravityModelRateLimitKeys(account, modelName)
-	if len(keys) == 0 {
+	return s.setAntigravityModelRateLimitKeys(ctx, repo, account, keys, prefix, statusCode, resetAt, afterSmartRetry)
+}
+
+func (s *AntigravityGatewayService) setAntigravityModelRateLimitKeys(ctx context.Context, repo AccountRepository, account *Account, keys []string, prefix string, statusCode int, resetAt time.Time, afterSmartRetry bool) bool {
+	if account == nil || repo == nil || len(keys) == 0 {
 		return false
 	}
 
@@ -1247,17 +1251,32 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 			modelKey = resolveAntigravityModelKey(requestedModel)
 		}
 		if modelKey != "" {
+			if resetAt == nil && isSingleAccountRetry(ctx) {
+				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 bare_429_single_account_skip_cooldown model=%s account=%d",
+					prefix, modelKey, account.ID)
+				return nil
+			}
+			keys := antigravityModelRateLimitKeys(account, modelKey)
+			// 裸 429 无明确配额重置时间时，仅锁定当前模型，避免误伤整个 Gemini 家族池（#8836）。
+			if resetAt == nil && len(keys) > 1 {
+				keys = keys[:1]
+			}
 			ra := s.resolveResetTime(resetAt, defaultDur)
-			if !s.setAntigravityModelRateLimits(ctx, s.accountRepo, account, modelKey, prefix, statusCode, ra, false) {
-				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limit_set_failed model=%s", prefix, modelKey)
+			if !s.setAntigravityModelRateLimitKeys(ctx, s.accountRepo, account, keys, prefix, statusCode, ra, false) {
+				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limit_set_failed model=%s keys=%s", prefix, modelKey, strings.Join(keys, ","))
 			} else {
-				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limited model=%s account=%d reset_at=%v reset_in=%v",
-					prefix, modelKey, account.ID, ra.Format("15:04:05"), time.Until(ra).Truncate(time.Second))
+				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limited model=%s keys=%s account=%d reset_at=%v reset_in=%v",
+					prefix, modelKey, strings.Join(keys, ","), account.ID, ra.Format("15:04:05"), time.Until(ra).Truncate(time.Second))
 			}
 			return nil
 		}
 
-		// 无法解析模型 key，兜底为账号级限流
+		// 无法解析模型 key，兜底为账号级限流（单账号分组裸 429 豁免落库冷却）
+		if resetAt == nil && isSingleAccountRetry(ctx) {
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 bare_429_single_account_skip_cooldown account=%d (fallback)",
+				prefix, account.ID)
+			return nil
+		}
 		ra := s.resolveResetTime(resetAt, defaultDur)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 rate_limited account=%d reset_at=%v reset_in=%v (fallback)",
 			prefix, account.ID, ra.Format("15:04:05"), time.Until(ra).Truncate(time.Second))

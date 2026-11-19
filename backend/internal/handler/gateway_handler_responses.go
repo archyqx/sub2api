@@ -109,6 +109,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	if service.IsImageGenerationIntentForPlatform("/v1/responses", reqModel, body, openAICompatibleRequestPlatform(c.Request.Context(), apiKey)) {
 		requestCtx = service.WithOpenAIImageGenerationIntent(requestCtx)
 	}
+	requestCtx = h.gatewayService.WithSingleAntigravityAccountGroupProbe(requestCtx, apiKey.GroupID)
 	c.Request = c.Request.WithContext(requestCtx)
 
 	// 解析渠道级模型映射
