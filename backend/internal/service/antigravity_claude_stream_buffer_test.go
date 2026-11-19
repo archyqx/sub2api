@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,10 +19,11 @@ import (
 func TestHandleClaudeStreamingResponse_EmptyContentReturnsFailoverError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
-		name             string
-		sse              string
-		wantRetryable    bool
-		wantNextAcctStop bool
+		name               string
+		sse                string
+		wantRetryable      bool
+		wantNextAcctStop   bool
+		wantSameAccountMax int
 	}{
 		{
 			name:             "usage_only_stop_zero_output",
@@ -30,10 +32,11 @@ func TestHandleClaudeStreamingResponse_EmptyContentReturnsFailoverError(t *testi
 			wantNextAcctStop: false,
 		},
 		{
-			name:             "empty_finish_reason_zero_output",
-			sse:              `data: {"response":{"usageMetadata":{"promptTokenCount":186997,"candidatesTokenCount":0,"thoughtsTokenCount":0}}}` + "\n\n",
-			wantRetryable:    true,
-			wantNextAcctStop: false,
+			name:               "empty_finish_reason_zero_output",
+			sse:                `data: {"response":{"usageMetadata":{"promptTokenCount":186997,"candidatesTokenCount":0,"thoughtsTokenCount":0}}}` + "\n\n",
+			wantRetryable:      true,
+			wantNextAcctStop:   false,
+			wantSameAccountMax: 1,
 		},
 		{
 			name:             "malformed_function_call_signature_only",
@@ -88,7 +91,7 @@ func TestHandleClaudeStreamingResponse_EmptyContentReturnsFailoverError(t *testi
 			require.ErrorAs(t, err, &failoverErr)
 			require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
 			require.Equal(t, tt.wantRetryable, failoverErr.RetryableOnSameAccount)
-			require.Zero(t, failoverErr.SameAccountRetryMax)
+			require.Equal(t, tt.wantSameAccountMax, failoverErr.SameAccountRetryMax)
 			require.Equal(t, !tt.wantNextAcctStop, failoverErr.ShouldRetryNextAccount())
 			require.True(t, failoverErr.RequestScopedTransient)
 			require.Equal(t, sizeBefore, c.Writer.Size(), "nothing should be written before meaningful content")
@@ -601,4 +604,222 @@ func TestAntigravityCompatStreamSession_ConsumeTracksDiagnosticsWithoutPolluting
 	require.Equal(t, int64(7), session.lastCandidatesTokens)
 	require.Equal(t, int64(2500), session.lastThoughtsTokens)
 	require.Equal(t, &ClaudeUsage{}, session.usage, "diagnostic tracking must not touch or pollute s.usage")
+}
+
+func TestHandleGeminiStreamToNonStreaming_EmptyShellAndTinyProbePolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("empty text shell and signature-only shell trigger failover instead of 200", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			sse  string
+		}{
+			{
+				name: "empty_text_part",
+				sse:  `data: {"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}}` + "\n\n",
+			},
+			{
+				name: "signature_only_part",
+				sse:  `data: {"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-only"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}}` + "\n\n",
+			},
+			{
+				name: "empty_parts_array",
+				sse:  `data: {"response":{"candidates":[{"content":{"parts":[]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":50,"candidatesTokenCount":0,"thoughtsTokenCount":120}}}` + "\n\n",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+				c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:generateContent", nil)
+				resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(tc.sse))}
+
+				res, err := svc.handleGeminiStreamToNonStreamingWithConfig(c, resp, time.Now(), 4096, 1024)
+				require.Nil(t, res)
+				var failoverErr *UpstreamFailoverError
+				require.ErrorAs(t, err, &failoverErr)
+				require.True(t, failoverErr.RetryableOnSameAccount)
+				require.True(t, failoverErr.RequestScopedTransient)
+				require.Empty(t, rec.Body.String())
+			})
+		}
+	})
+
+	t.Run("safety block stops immediately without retry", func(t *testing.T) {
+		sse := `data: {"response":{"candidates":[{"finishReason":"PROHIBITED_CONTENT"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":0}}}` + "\n\n"
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+		c, _ := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:generateContent", nil)
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sse))}
+
+		res, err := svc.handleGeminiStreamToNonStreamingWithConfig(c, resp, time.Now(), 4096, 1024)
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.False(t, failoverErr.RetryableOnSameAccount)
+		require.False(t, failoverErr.ShouldRetryNextAccount())
+		require.True(t, failoverErr.RequestScopedTransient)
+	})
+
+	t.Run("tiny max_output_tokens probe passes through 200", func(t *testing.T) {
+		sse := `data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":18,"candidatesTokenCount":0,"thoughtsTokenCount":128}}}` + "\n\n"
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+		c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:generateContent", nil)
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sse))}
+
+		res, err := svc.handleGeminiStreamToNonStreamingWithConfig(c, resp, time.Now(), 256, 1024)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Equal(t, http.StatusOK, rec.Code)
+	})
+
+	t.Run("grounding metadata without parts passes through 200", func(t *testing.T) {
+		sse := `data: {"response":{"candidates":[{"groundingMetadata":{"webSearchQueries":["sub2api"]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":3}}}` + "\n\n"
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+		c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:generateContent", nil)
+		resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(sse))}
+
+		res, err := svc.handleGeminiStreamToNonStreamingWithConfig(c, resp, time.Now(), 4096, 1024)
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "sub2api")
+	})
+}
+
+func TestHandleGeminiStreamingResponse_DelayedHeaderCommitAndGuards(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("zero-byte EOF does not commit headers and triggers failover", func(t *testing.T) {
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+		c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:streamGenerateContent", nil)
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}
+
+		res, err := svc.handleGeminiStreamingResponseWithBytes(c, resp, time.Now(), 1024)
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.True(t, failoverErr.RetryableOnSameAccount)
+		require.False(t, IsResponseCommitted(c))
+		require.Empty(t, rec.Header().Get("Content-Type"))
+		require.Empty(t, rec.Body.String())
+	})
+
+	t.Run("pre-data comments and keepalive ticks are suppressed and timeout returns failover", func(t *testing.T) {
+		svc := newAntigravityCompatService(config.GatewayConfig{
+			MaxLineSize:               defaultMaxLineSize,
+			StreamKeepaliveInterval:   1,
+			StreamDataIntervalTimeout: 1,
+		}, nil)
+		c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:streamGenerateContent", nil)
+		pr, pw := io.Pipe()
+		defer func() { _ = pr.Close() }()
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: pr}
+
+		go func() {
+			_, _ = io.WriteString(pw, ": upstream comment\n\n")
+		}()
+
+		res, err := svc.handleGeminiStreamingResponseWithBytes(c, resp, time.Now(), 1024)
+		_ = pw.Close()
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.Empty(t, rec.Header().Get("Content-Type"))
+		require.Empty(t, rec.Body.String())
+	})
+
+	t.Run("read error before first data returns failover without committing SSE error", func(t *testing.T) {
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+		c, rec := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:streamGenerateContent", nil)
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       &antigravityCompatErrorReader{data: []byte(": comment\n\n"), err: io.ErrUnexpectedEOF},
+		}
+
+		res, err := svc.handleGeminiStreamingResponseWithBytes(c, resp, time.Now(), 1024)
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.Empty(t, rec.Body.String())
+	})
+}
+
+func TestAntigravityLongContextSilentEOFRetryPolicy(t *testing.T) {
+	t.Run("context thresholds", func(t *testing.T) {
+		// 1. Long promptTokens >= 100k with silent EOF -> SameAccountRetryMax = 1
+		errPrompt := newAntigravityEmptyStreamFailoverErrorWithContext("", "", 1, 100_000, 1024, time.Second)
+		require.True(t, errPrompt.RetryableOnSameAccount)
+		require.Equal(t, 1, errPrompt.SameAccountRetryMax)
+
+		// 2. Large reqBodyBytes >= 400KB with silent EOF -> SameAccountRetryMax = 1
+		errBytes := newAntigravityEmptyStreamFailoverErrorWithContext("", "", 0, 0, 400*1024, time.Second)
+		require.True(t, errBytes.RetryableOnSameAccount)
+		require.Equal(t, 1, errBytes.SameAccountRetryMax)
+
+		// 3. Slow elapsed >= 15s with silent EOF -> SameAccountRetryMax = 1
+		errElapsed := newAntigravityEmptyStreamFailoverErrorWithContext("", "", 0, 0, 1024, 15*time.Second)
+		require.True(t, errElapsed.RetryableOnSameAccount)
+		require.Equal(t, 1, errElapsed.SameAccountRetryMax)
+
+		// 4. Elapsed = 8s (below 15s) with small prompt/body -> full retry budget (SameAccountRetryMax == 0)
+		err8s := newAntigravityEmptyStreamFailoverErrorWithContext("", "", 0, 10_000, 1024, 8*time.Second)
+		require.True(t, err8s.RetryableOnSameAccount)
+		require.Equal(t, 0, err8s.SameAccountRetryMax)
+
+		// 5. MAX_TOKENS even with large prompt and body -> full retry budget (SameAccountRetryMax == 0)
+		errMaxTokens := newAntigravityEmptyStreamFailoverErrorWithContext("MAX_TOKENS", "", 1, 150_000, 500*1024, 20*time.Second)
+		require.True(t, errMaxTokens.RetryableOnSameAccount)
+		require.Equal(t, 0, errMaxTokens.SameAccountRetryMax)
+	})
+
+	t.Run("Forward passes reqBodyBytes >= 400KB into empty-stream retry cap", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		upstream := &queuedHTTPUpstreamStub{
+			responses: []*http.Response{
+				{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+				},
+			},
+		}
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+		account := newAntigravityCompatAccount(AccountTypeOAuth)
+		largeText := strings.Repeat("a", 410*1024)
+		body := []byte(fmt.Sprintf(`{"model":"claude-sonnet-4-6","stream":true,"max_tokens":4096,"messages":[{"role":"user","content":%q}]}`, largeText))
+		c, _ := newAntigravityCompatContext(http.MethodPost, "/antigravity/v1/messages", body)
+
+		res, err := svc.Forward(context.Background(), c, account, body, false)
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.True(t, failoverErr.RetryableOnSameAccount)
+		require.Equal(t, 1, failoverErr.SameAccountRetryMax)
+	})
+
+	t.Run("ForwardGemini passes reqBodyBytes >= 400KB into empty-stream retry cap", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		upstream := &queuedHTTPUpstreamStub{
+			responses: []*http.Response{
+				{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader("")),
+				},
+			},
+		}
+		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+		account := newAntigravityCompatAccount(AccountTypeOAuth)
+		mm := account.Credentials["model_mapping"].(map[string]any)
+		mm["gemini-4-hydrogen"] = "gemini-4-hydrogen"
+		largeText := strings.Repeat("b", 410*1024)
+		body := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[{"text":%q}]}]}`, largeText))
+		c, _ := newAntigravityCompatContext(http.MethodPost, "/v1beta/models/gemini-4-hydrogen:streamGenerateContent", body)
+
+		res, err := svc.ForwardGemini(context.Background(), c, account, "gemini-4-hydrogen", "streamGenerateContent", true, body, false)
+		require.Nil(t, res)
+		var failoverErr *UpstreamFailoverError
+		require.ErrorAs(t, err, &failoverErr)
+		require.True(t, failoverErr.RetryableOnSameAccount)
+		require.Equal(t, 1, failoverErr.SameAccountRetryMax)
+	})
 }

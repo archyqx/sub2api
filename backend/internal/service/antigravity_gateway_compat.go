@@ -511,24 +511,26 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatSuccess(
 	call *antigravityCompatUpstreamCall,
 	resp *http.Response,
 ) (*antigravityStreamResult, error) {
+	reqBodyBytes := len(call.geminiBody)
 	if call.request.clientStream {
 		if call.request.protocol == antigravityCompatChatCompletions {
-			return s.handleChatCompletionsStreamingFromAntigravity(
+			return s.handleChatCompletionsStreamingFromAntigravityWithBytes(
 				c,
 				resp,
 				call.request.startTime,
 				call.request.originalModel,
 				call.request.includeUsage,
+				reqBodyBytes,
 			)
 		}
-		return s.handleResponsesStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
+		return s.handleResponsesStreamingFromAntigravityWithBytes(c, resp, call.request.startTime, call.request.originalModel, reqBodyBytes)
 	}
 
 	effectiveMaxOutputTokens := extractGeminiMaxOutputTokens(call.geminiBody)
 	if call.request.protocol == antigravityCompatChatCompletions {
-		return s.handleChatCompletionsNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
+		return s.handleChatCompletionsNonStreamingFromAntigravityWithBytes(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens, reqBodyBytes)
 	}
-	return s.handleResponsesNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
+	return s.handleResponsesNonStreamingFromAntigravityWithBytes(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens, reqBodyBytes)
 }
 
 func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
@@ -653,7 +655,18 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	originalModel string,
 	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
+	return s.handleChatCompletionsNonStreamingFromAntigravityWithBytes(c, resp, startTime, originalModel, maxOutputTokens, 0)
+}
+
+func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigravityWithBytes(
+	c *gin.Context,
+	resp *http.Response,
+	startTime time.Time,
+	originalModel string,
+	maxOutputTokens int,
+	reqBodyBytes int,
+) (*antigravityStreamResult, error) {
+	claudeResponse, result, err := s.collectClaudeStreamResponseWithBytes(c, resp, startTime, originalModel, maxOutputTokens, reqBodyBytes)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
@@ -673,7 +686,18 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	originalModel string,
 	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
+	return s.handleResponsesNonStreamingFromAntigravityWithBytes(c, resp, startTime, originalModel, maxOutputTokens, 0)
+}
+
+func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravityWithBytes(
+	c *gin.Context,
+	resp *http.Response,
+	startTime time.Time,
+	originalModel string,
+	maxOutputTokens int,
+	reqBodyBytes int,
+) (*antigravityStreamResult, error) {
+	claudeResponse, result, err := s.collectClaudeStreamResponseWithBytes(c, resp, startTime, originalModel, maxOutputTokens, reqBodyBytes)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}

@@ -28,11 +28,17 @@ type antigravityClaudeStreamBuffer struct {
 	lastPromptTokens     int64
 	lastCandidatesTokens int64
 	lastThoughtsTokens   int64
+	reqBodyBytes         int
 }
 
 func newAntigravityClaudeStreamBuffer() *antigravityClaudeStreamBuffer {
+	return newAntigravityClaudeStreamBufferWithBytes(0)
+}
+
+func newAntigravityClaudeStreamBufferWithBytes(reqBodyBytes int) *antigravityClaudeStreamBuffer {
 	return &antigravityClaudeStreamBuffer{
 		preContentKeepaliveGrace: antigravityClaudePreContentKeepaliveGrace,
+		reqBodyBytes:             reqBodyBytes,
 	}
 }
 
@@ -131,6 +137,35 @@ func newAntigravityEmptyStreamFailoverError(finishReason, blockReason string) *U
 		RetryableOnSameAccount: true,
 		RequestScopedTransient: true,
 	}
+}
+
+const (
+	antigravityLongContextPromptTokensThreshold = 100_000
+	antigravityLongContextReqBytesThreshold     = 400 * 1024
+	antigravityLongContextElapsedThreshold      = 15 * time.Second
+)
+
+// newAntigravityEmptyStreamFailoverErrorWithContext caps same-account retries to 1 on
+// deterministic long-context silent EOFs (finishReason=="", seenLines<=1, and
+// promptTokens>=100k || reqBodyBytes>=400KB || elapsed>=15s) while leaving MAX_TOKENS
+// and short/medium-context empty streams at the full retry budget.
+func newAntigravityEmptyStreamFailoverErrorWithContext(
+	finishReason, blockReason string,
+	seenLines int,
+	promptTokens int64,
+	reqBodyBytes int,
+	elapsed time.Duration,
+) *UpstreamFailoverError {
+	err := newAntigravityEmptyStreamFailoverError(finishReason, blockReason)
+	if err.RetryableOnSameAccount &&
+		strings.TrimSpace(finishReason) == "" &&
+		seenLines <= 1 &&
+		(promptTokens >= antigravityLongContextPromptTokensThreshold ||
+			reqBodyBytes >= antigravityLongContextReqBytesThreshold ||
+			elapsed >= antigravityLongContextElapsedThreshold) {
+		err.SameAccountRetryMax = 1
+	}
+	return err
 }
 
 func (b *antigravityClaudeStreamBuffer) hasMeaningfulContent(processor *antigravity.StreamingProcessor, events []byte) bool {
@@ -265,5 +300,12 @@ func (b *antigravityClaudeStreamBuffer) Finish(
 		}, newAntigravityCompatCommittedNoContentError("empty Antigravity claude stream after keepalive")
 	}
 
-	return nil, newAntigravityEmptyStreamFailoverError(b.lastFinishReason, b.lastBlockReason)
+	return nil, newAntigravityEmptyStreamFailoverErrorWithContext(
+		b.lastFinishReason,
+		b.lastBlockReason,
+		b.seenLines,
+		b.lastPromptTokens,
+		b.reqBodyBytes,
+		time.Since(startTime),
+	)
 }

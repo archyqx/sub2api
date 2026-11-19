@@ -120,6 +120,7 @@ type antigravityCompatStreamSession struct {
 	lastPromptTokens            int64
 	lastCandidatesTokens        int64
 	lastThoughtsTokens          int64
+	reqBodyBytes                int
 	meaningfulData              bool
 	preContentKeepaliveSent     bool
 	preContentKeepaliveInterval time.Duration
@@ -347,7 +348,19 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamAfterHeaders(
 	adapter antigravityCompatStreamAdapter,
 	prefix string,
 ) (*antigravityStreamResult, error) {
-	return s.handleAntigravityCompatStreamWithTiming(
+	return s.handleAntigravityCompatStreamAfterHeadersWithBytes(c, resp, startTime, originalModel, adapter, prefix, 0)
+}
+
+func (s *AntigravityGatewayService) handleAntigravityCompatStreamAfterHeadersWithBytes(
+	c *gin.Context,
+	resp *http.Response,
+	startTime time.Time,
+	originalModel string,
+	adapter antigravityCompatStreamAdapter,
+	prefix string,
+	reqBodyBytes int,
+) (*antigravityStreamResult, error) {
+	return s.handleAntigravityCompatStreamWithTimingAndBytes(
 		c,
 		resp,
 		startTime,
@@ -357,6 +370,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamAfterHeaders(
 		prefix,
 		s.antigravityCompatPreContentKeepaliveInterval(),
 		s.antigravityCompatPreContentMaxWait(),
+		reqBodyBytes,
 	)
 }
 
@@ -370,6 +384,13 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithKeepaliveIn
 func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithTiming(
 	c *gin.Context, resp *http.Response, startTime, streamStart time.Time, originalModel string,
 	adapter antigravityCompatStreamAdapter, prefix string, interval, maxPreContentWait time.Duration,
+) (*antigravityStreamResult, error) {
+	return s.handleAntigravityCompatStreamWithTimingAndBytes(c, resp, startTime, streamStart, originalModel, adapter, prefix, interval, maxPreContentWait, 0)
+}
+
+func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithTimingAndBytes(
+	c *gin.Context, resp *http.Response, startTime, streamStart time.Time, originalModel string,
+	adapter antigravityCompatStreamAdapter, prefix string, interval, maxPreContentWait time.Duration, reqBodyBytes int,
 ) (*antigravityStreamResult, error) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -385,6 +406,7 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStreamWithTiming(
 		c.Status(http.StatusOK)
 	}
 	session := newAntigravityCompatStreamSession(originalModel, startTime, adapter, writer)
+	session.reqBodyBytes = reqBodyBytes
 	session.preContentKeepaliveSent = IsResponseCommitted(c) && c.Writer.Written()
 	session.preContentKeepaliveInterval = interval
 	events, stopScanner, maxLineSize, queueBudget := s.startAntigravityCompatScanner(resp.Body)
@@ -624,7 +646,14 @@ func antigravityCompatEmptyStreamError(session *antigravityCompatStreamSession) 
 		session.lastThoughtsTokens,
 		session.elapsedMs(),
 	)
-	return newAntigravityEmptyStreamFailoverError(session.lastFinishReason, session.lastBlockReason)
+	return newAntigravityEmptyStreamFailoverErrorWithContext(
+		session.lastFinishReason,
+		session.lastBlockReason,
+		session.seenLines,
+		session.lastPromptTokens,
+		session.reqBodyBytes,
+		time.Duration(session.elapsedMs())*time.Millisecond,
+	)
 }
 
 func (s *AntigravityGatewayService) handleChatCompletionsStreamingFromAntigravity(
@@ -634,13 +663,25 @@ func (s *AntigravityGatewayService) handleChatCompletionsStreamingFromAntigravit
 	originalModel string,
 	includeUsage bool,
 ) (*antigravityStreamResult, error) {
-	return s.handleAntigravityCompatStreamAfterHeaders(
+	return s.handleChatCompletionsStreamingFromAntigravityWithBytes(c, resp, startTime, originalModel, includeUsage, 0)
+}
+
+func (s *AntigravityGatewayService) handleChatCompletionsStreamingFromAntigravityWithBytes(
+	c *gin.Context,
+	resp *http.Response,
+	startTime time.Time,
+	originalModel string,
+	includeUsage bool,
+	reqBodyBytes int,
+) (*antigravityStreamResult, error) {
+	return s.handleAntigravityCompatStreamAfterHeadersWithBytes(
 		c,
 		resp,
 		startTime,
 		originalModel,
 		newAntigravityChatStreamAdapter(originalModel, includeUsage),
 		"antigravity chat completions stream",
+		reqBodyBytes,
 	)
 }
 
@@ -650,12 +691,23 @@ func (s *AntigravityGatewayService) handleResponsesStreamingFromAntigravity(
 	startTime time.Time,
 	originalModel string,
 ) (*antigravityStreamResult, error) {
-	return s.handleAntigravityCompatStreamAfterHeaders(
+	return s.handleResponsesStreamingFromAntigravityWithBytes(c, resp, startTime, originalModel, 0)
+}
+
+func (s *AntigravityGatewayService) handleResponsesStreamingFromAntigravityWithBytes(
+	c *gin.Context,
+	resp *http.Response,
+	startTime time.Time,
+	originalModel string,
+	reqBodyBytes int,
+) (*antigravityStreamResult, error) {
+	return s.handleAntigravityCompatStreamAfterHeadersWithBytes(
 		c,
 		resp,
 		startTime,
 		originalModel,
 		newAntigravityResponsesStreamAdapter(originalModel),
 		"antigravity responses stream",
+		reqBodyBytes,
 	)
 }

@@ -453,7 +453,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	var clientDisconnect bool
 	if claudeReq.Stream {
 		// 客户端要求流式，直接透传转换
-		streamRes, err := s.handleClaudeStreamingResponse(c, resp, startTime, originalModel)
+		streamRes, err := s.handleClaudeStreamingResponseWithBytes(c, resp, startTime, originalModel, len(effectiveGeminiBody))
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, err)
 			return nil, err
@@ -463,7 +463,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		clientDisconnect = streamRes.clientDisconnect
 	} else {
 		// 客户端要求非流式，收集流式响应后转换返回
-		streamRes, err := s.handleClaudeStreamToNonStreaming(c, resp, startTime, originalModel, extractGeminiMaxOutputTokens(effectiveGeminiBody))
+		streamRes, err := s.handleClaudeStreamToNonStreamingWithBytes(c, resp, startTime, originalModel, extractGeminiMaxOutputTokens(effectiveGeminiBody), len(effectiveGeminiBody))
 		if err != nil {
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_collect_error error=%v", prefix, err)
 			return nil, err
