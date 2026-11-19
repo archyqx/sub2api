@@ -46,28 +46,34 @@ type antigravityRetryLoopResult struct {
 	resp *http.Response
 }
 
+// resolveAntigravityForwardBaseURLs 解析 Antigravity 账号应使用的单一上游端点列表。
+// 付费 Pro/Ultra 账号严格固定返回 [dailyURL]，绝不允许回退到 prod 端点；
+// 免费/未知账号固定返回 [prodURL]，避免触发 401。
+func resolveAntigravityForwardBaseURLs(account *Account) []string {
+	baseURLs := antigravity.BaseURLs
+	if len(baseURLs) == 0 {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv(antigravityForwardBaseURLEnv)))
+	if (mode == "daily" || mode == "sandbox") && len(baseURLs) > 1 {
+		return []string{baseURLs[1]}
+	}
+	if mode == "" && accountHasAntigravityPaidTier(account) && len(baseURLs) > 1 {
+		return []string{baseURLs[1]}
+	}
+	return []string{baseURLs[0]}
+}
+
 // resolveAntigravityForwardBaseURL 解析转发用 base URL。
 //
 // 显式环境变量优先。未配置时，LoadCodeAssist 返回 paidTier 的付费账号使用
 // daily 端点，其他账号继续使用生产端点，避免免费账号的 OAuth token 出现 401。
-//
-// 历史上这里改用 ForwardBaseURLs()（把 daily/sandbox 排到首位）并默认取首个地址，
-// 导致网关把带生产 OAuth token 的请求发到 daily-cloudcode-pa.sandbox.googleapis.com，
-// 上游拒绝 → 账号被 401「Invalid bearer token」/502 打入临时不可调度且无法恢复
-// （见 #3611 / #2962）。后台「测试连接」用的是生产端点，所以「测试成功但网关 401」。
 func resolveAntigravityForwardBaseURL(account *Account) string {
-	baseURLs := antigravity.BaseURLs
-	if len(baseURLs) == 0 {
+	urls := resolveAntigravityForwardBaseURLs(account)
+	if len(urls) == 0 {
 		return ""
 	}
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(antigravityForwardBaseURLEnv)))
-	if (mode == "daily" || mode == "sandbox") && len(baseURLs) > 1 {
-		return baseURLs[1]
-	}
-	if mode == "" && accountHasAntigravityPaidTier(account) && len(baseURLs) > 1 {
-		return baseURLs[1]
-	}
-	return baseURLs[0]
+	return urls[0]
 }
 
 func accountHasAntigravityPaidTier(account *Account) bool {

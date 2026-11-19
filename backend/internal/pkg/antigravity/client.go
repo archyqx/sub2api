@@ -465,8 +465,13 @@ func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (*UserInfo
 }
 
 // LoadCodeAssist 获取账户信息，返回解析后的结构体和原始 JSON
-// 支持 URL fallback：sandbox → daily → prod
+// 支持 URL fallback：prod → daily
 func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadCodeAssistResponse, map[string]any, error) {
+	return c.LoadCodeAssistWithURLs(ctx, accessToken, BaseURLs)
+}
+
+// LoadCodeAssistWithURLs 使用指定的 base URL 列表按顺序获取账户信息。
+func (c *Client) LoadCodeAssistWithURLs(ctx context.Context, accessToken string, urls []string) (*LoadCodeAssistResponse, map[string]any, error) {
 	reqBody := LoadCodeAssistRequest{}
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
 	reqBody.Metadata.IDEVersion = GetUserAgentVersionForContext(ctx)
@@ -477,8 +482,10 @@ func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadC
 		return nil, nil, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
-	// 固定顺序：prod -> daily
-	availableURLs := BaseURLs
+	availableURLs := urls
+	if len(availableURLs) == 0 {
+		availableURLs = BaseURLs
+	}
 
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
@@ -672,7 +679,7 @@ type DeprecatedModelInfo struct {
 
 // FetchAvailableModelsRequest fetchAvailableModels 请求
 type FetchAvailableModelsRequest struct {
-	Project string `json:"project"`
+	Project string `json:"project,omitempty"`
 }
 
 // FetchAvailableModelsResponse fetchAvailableModels 响应
@@ -685,6 +692,15 @@ type FetchAvailableModelsResponse struct {
 // 保留旧调用的 URL fallback：prod → daily。
 func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectID string, bodyLimit int64) (*FetchAvailableModelsResponse, map[string]any, error) {
 	return c.fetchAvailableModels(ctx, BaseURLs, accessToken, projectID, bodyLimit, false)
+}
+
+// FetchAvailableModelsWithURLs 使用指定的 base URL 列表获取可用模型和配额信息。
+func (c *Client) FetchAvailableModelsWithURLs(ctx context.Context, accessToken, projectID string, bodyLimit int64, urls []string) (*FetchAvailableModelsResponse, map[string]any, error) {
+	availableURLs := urls
+	if len(availableURLs) == 0 {
+		availableURLs = BaseURLs
+	}
+	return c.fetchAvailableModels(ctx, availableURLs, accessToken, projectID, bodyLimit, len(availableURLs) == 1)
 }
 
 // FetchAvailableModelsFromURL 获取指定端点的模型目录，不回退到其他端点。

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +76,61 @@ func TestClient_RetrieveUserQuotaSummaryFromURL_Errors(t *testing.T) {
 			t.Errorf("status %d body %q must be an error", tc.status, tc.body)
 		}
 		server.Close()
+	}
+}
+
+func TestClient_WithURLsMethodsAndProjectOmitEmpty(t *testing.T) {
+	raw, err := json.Marshal(FetchAvailableModelsRequest{})
+	if err != nil {
+		t.Fatalf("marshal empty request: %v", err)
+	}
+	if strings.Contains(string(raw), `"project"`) {
+		t.Fatalf("expected empty project to be omitted, got %s", string(raw))
+	}
+
+	var hitPaths []string
+	daily := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPaths = append(hitPaths, "daily:"+r.URL.Path)
+		switch r.URL.Path {
+		case "/v1internal:fetchAvailableModels":
+			_, _ = w.Write([]byte(`{"models":{"gemini-4-hydrogen-high":{"quotaInfo":{"remainingFraction":0.8}}}}`))
+		case "/v1internal:loadCodeAssist":
+			_, _ = w.Write([]byte(`{"cloudaicompanionProject":"proj-1","paidTier":{"id":"g1-ultra-tier"}}`))
+		case "/v1internal:retrieveUserQuotaSummary":
+			_, _ = w.Write([]byte(quotaSummaryBody))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer daily.Close()
+
+	prod := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPaths = append(hitPaths, "prod:"+r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer prod.Close()
+
+	client := mustNewClient(t, "")
+	urls := []string{daily.URL}
+
+	modelsResp, _, err := client.FetchAvailableModelsWithURLs(context.Background(), "tok", "", 1<<20, urls)
+	if err != nil || modelsResp.Models["gemini-4-hydrogen-high"].QuotaInfo == nil {
+		t.Fatalf("FetchAvailableModelsWithURLs failed: %v, %+v", err, modelsResp)
+	}
+	loadResp, _, err := client.LoadCodeAssistWithURLs(context.Background(), "tok", urls)
+	if err != nil || loadResp.GetTier() != "g1-ultra-tier" {
+		t.Fatalf("LoadCodeAssistWithURLs failed: %v, %+v", err, loadResp)
+	}
+	summary, err := client.RetrieveUserQuotaSummaryWithURLs(context.Background(), "tok", "", urls)
+	if err != nil || len(summary.Groups) != 2 {
+		t.Fatalf("RetrieveUserQuotaSummaryWithURLs failed: %v, %+v", err, summary)
+	}
+	for _, hit := range hitPaths {
+		if strings.HasPrefix(hit, "prod:") {
+			t.Fatalf("unexpected prod hit: %v", hitPaths)
+		}
+	}
+	if len(hitPaths) != 3 {
+		t.Fatalf("expected 3 daily hits, got %v", hitPaths)
 	}
 }

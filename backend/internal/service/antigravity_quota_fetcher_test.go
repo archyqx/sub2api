@@ -555,3 +555,85 @@ func TestExtractValidationURL(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveAntigravityForwardBaseURLs_PaidNeverFallsBackToProd(t *testing.T) {
+	t.Setenv(antigravityForwardBaseURLEnv, "")
+
+	oldBaseURLs := append([]string(nil), antigravity.BaseURLs...)
+	t.Cleanup(func() { antigravity.BaseURLs = oldBaseURLs })
+
+	prodURL := "https://prod.example"
+	dailyURL := "https://daily.example"
+	antigravity.BaseURLs = []string{prodURL, dailyURL}
+
+	require.Equal(t, []string{dailyURL}, resolveAntigravityForwardBaseURLs(&Account{Credentials: map[string]any{"plan_type": "Pro"}}))
+	require.Equal(t, []string{dailyURL}, resolveAntigravityForwardBaseURLs(&Account{Credentials: map[string]any{"plan_type": "Ultra"}}))
+	require.Equal(t, []string{prodURL}, resolveAntigravityForwardBaseURLs(&Account{Credentials: map[string]any{"plan_type": "Free"}}))
+	require.Equal(t, []string{prodURL}, resolveAntigravityForwardBaseURLs(nil))
+}
+
+func TestFetchQuota_PaidAccountUsesDailyEndpointWithoutProdFallback(t *testing.T) {
+	t.Setenv(antigravityForwardBaseURLEnv, "")
+
+	oldBaseURLs := append([]string(nil), antigravity.BaseURLs...)
+	oldAvailability := antigravity.DefaultURLAvailability
+	t.Cleanup(func() {
+		antigravity.BaseURLs = oldBaseURLs
+		antigravity.DefaultURLAvailability = oldAvailability
+	})
+
+	var prodHits, dailyHits int
+	prodServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prodHits++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":{}}`))
+	}))
+	defer prodServer.Close()
+
+	dailyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dailyHits++
+		switch r.URL.Path {
+		case "/v1internal:fetchAvailableModels":
+			_, _ = w.Write([]byte(`{"models":{"gemini-4-hydrogen-high":{"quotaInfo":{"remainingFraction":0.6}}}}`))
+		case "/v1internal:loadCodeAssist":
+			_, _ = w.Write([]byte(`{"paidTier":{"id":"g1-ultra-tier"}}`))
+		case "/v1internal:retrieveUserQuotaSummary":
+			_, _ = w.Write([]byte(`{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.6}]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer dailyServer.Close()
+
+	antigravity.BaseURLs = []string{prodServer.URL, dailyServer.URL}
+	antigravity.DefaultURLAvailability = antigravity.NewURLAvailability(time.Minute)
+
+	fetcher := NewAntigravityQuotaFetcher(nil, &config.Config{})
+	paidAccount := &Account{
+		ID:       77,
+		Platform: PlatformAntigravity,
+		Type:     AccountTypeOAuth,
+		Credentials: map[string]any{
+			"access_token": "tok",
+			"project_id":   "proj",
+			"plan_type":    "Ultra",
+		},
+	}
+
+	res, err := fetcher.FetchQuota(context.Background(), paidAccount, "")
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Equal(t, 0, prodHits, "paid account must never hit prod endpoint")
+	require.Equal(t, 3, dailyHits)
+	require.Equal(t, "ULTRA", res.UsageInfo.SubscriptionTier)
+
+	// Even when daily returns 500, paid account must NOT fall back to prod (Redline #4).
+	dailyFailServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer dailyFailServer.Close()
+	antigravity.BaseURLs = []string{prodServer.URL, dailyFailServer.URL}
+	_, err = fetcher.FetchQuota(context.Background(), paidAccount, "")
+	require.Error(t, err)
+	require.Equal(t, 0, prodHits, "paid account must never fall back to prod on daily failure")
+}
