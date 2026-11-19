@@ -681,7 +681,7 @@ const (
 	maxOutputTokensClaude                = 64000
 	geminiReasoningProbeMaxTokensCeiling = 8
 	geminiReasoningProbeMinOutputTokens  = 256
-	geminiReasoningMinOutputTokens       = 1024
+	geminiReasoningMinOutputTokens       = 4096
 )
 
 // ApplyGeminiReasoningMinMaxOutputTokens 为强制隐藏思考的 Gemini 推理模型温和托底小正数 max_tokens，

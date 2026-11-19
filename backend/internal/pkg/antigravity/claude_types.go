@@ -287,7 +287,10 @@ func FallbackGeminiModel(model string) GeminiModel {
 func IsGeminiReasoningModel(modelID string) bool {
 	lowerID := strings.TrimSpace(strings.ToLower(modelID))
 	lowerID = strings.TrimPrefix(lowerID, "models/")
-	if strings.Contains(lowerID, "image") {
+	if strings.Contains(lowerID, "image") ||
+		strings.Contains(lowerID, "tts") ||
+		strings.Contains(lowerID, "embedding") ||
+		strings.Contains(lowerID, "audio") {
 		return false
 	}
 	if strings.HasPrefix(lowerID, "gemini-4-") ||

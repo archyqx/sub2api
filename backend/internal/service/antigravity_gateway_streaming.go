@@ -591,10 +591,28 @@ func mergeTrailingGeminiMetadata(
 	return result
 }
 
-const antigravityTinyMaxTokensProbeCeiling = 64
+const antigravityTinyMaxTokensProbeCeiling = 256
 
-func isTinyMaxTokensProbeExhausted(finishReason string, usage *antigravity.ClaudeUsage) bool {
+func extractGeminiMaxOutputTokens(geminiBody []byte) int {
+	if len(geminiBody) == 0 {
+		return 0
+	}
+	res := gjson.GetBytes(geminiBody, "request.generationConfig.maxOutputTokens")
+	if !res.Exists() || res.Type != gjson.Number {
+		return 0
+	}
+	val := int(res.Int())
+	if val <= 0 || float64(val) != res.Float() {
+		return 0
+	}
+	return val
+}
+
+func isTinyMaxTokensProbeExhausted(finishReason string, usage *antigravity.ClaudeUsage, maxOutputTokens int) bool {
 	if !strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") || usage == nil {
+		return false
+	}
+	if maxOutputTokens <= 0 || maxOutputTokens > antigravityTinyMaxTokensProbeCeiling {
 		return false
 	}
 	return usage.OutputTokens > 0 && usage.OutputTokens <= antigravityTinyMaxTokensProbeCeiling
@@ -862,7 +880,7 @@ func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int,
 
 // collectClaudeStreamResponse 收集上游流式响应，转换为 Claude 非流式格式返回
 // 用于处理客户端非流式请求但上游只支持流式的情况
-func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) ([]byte, *antigravityStreamResult, error) {
+func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string, maxOutputTokens int) ([]byte, *antigravityStreamResult, error) {
 	if upstreamResponseModelObserverFromContext(c) == nil {
 		beginUpstreamResponseModelObservation(c)
 	}
@@ -1037,8 +1055,8 @@ returnResponse:
 
 	// 校验转换后的 Claude 响应是否包含实质内容（非空 text / tool_use / 非空 thinking），
 	// 防止仅含 finishReason 或空签名壳的响应被放行为 200 content:[] 导致客户端空转重试；
-	// 豁免极小 max_tokens（<=64）连通性/预检探测因隐藏思考耗尽触发的 MAX_TOKENS。
-	if !hasSubstantiveClaudeResponseContent(claudeResp) && !isTinyMaxTokensProbeExhausted(meta.finishReason, agUsage) {
+	// 豁免极小 max_tokens（<=256）连通性/预检探测因隐藏思考耗尽触发的 MAX_TOKENS。
+	if !hasSubstantiveClaudeResponseContent(claudeResp) && !isTinyMaxTokensProbeExhausted(meta.finishReason, agUsage, maxOutputTokens) {
 		logger.LegacyPrintf(
 			"service.antigravity_gateway",
 			"[antigravity-Forward] warning: empty substantive response (claude non-stream): finish_reason=%s block_reason=%s input=%d output=%d, triggering failover",
@@ -1069,8 +1087,8 @@ returnResponse:
 
 // handleClaudeStreamToNonStreaming 收集上游流式响应，转换为 Claude 非流式格式返回
 // 用于处理客户端非流式请求但上游只支持流式的情况
-func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
-	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string, maxOutputTokens int) (*antigravityStreamResult, error) {
+	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		var failoverErr *UpstreamFailoverError
 		if errors.As(err, &failoverErr) {

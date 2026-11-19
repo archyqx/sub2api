@@ -358,9 +358,9 @@ func TestAntigravityNonStream_EmptyAndSignatureOnlyResponsesTriggerFailover(t *t
 					err error
 				)
 				if endpoint == "claude" {
-					res, err = svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-argon-low")
+					res, err = svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-argon-low", 4096)
 				} else {
-					res, err = svc.handleChatCompletionsNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-argon-low")
+					res, err = svc.handleChatCompletionsNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-argon-low", 4096)
 				}
 
 				require.Nil(t, res)
@@ -395,7 +395,7 @@ func TestAntigravityNonStream_PreservesTrailingUsageFinishReasonAndGrounding(t *
 			Body:       io.NopCloser(strings.NewReader(sse)),
 		}
 
-		res, err := svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-argon-low")
+		res, err := svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-argon-low", 4096)
 		require.NoError(t, err)
 		require.NotNil(t, res)
 		require.NotNil(t, res.usage)
@@ -441,9 +441,9 @@ func TestAntigravityNonStream_PreservesTrailingUsageFinishReasonAndGrounding(t *
 				err error
 			)
 			if endpoint == "claude" {
-				res, err = svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-hydrogen")
+				res, err = svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-hydrogen", 256)
 			} else {
-				res, err = svc.handleChatCompletionsNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-hydrogen")
+				res, err = svc.handleChatCompletionsNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-hydrogen", 256)
 			}
 
 			require.NoError(t, err)
@@ -453,4 +453,151 @@ func TestAntigravityNonStream_PreservesTrailingUsageFinishReasonAndGrounding(t *
 			require.Equal(t, http.StatusOK, rec.Code)
 		}
 	})
+}
+
+func TestCollectClaudeStreamResponse_TinyMaxTokensProbePolicy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("probe_max_output_tokens_256_max_tokens_thoughts_256_passes_200", func(t *testing.T) {
+		sse := `data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":24,"candidatesTokenCount":0,"thoughtsTokenCount":256}}}` + "\n\n"
+		for _, endpoint := range []string{"claude", "chat", "responses"} {
+			t.Run(endpoint, func(t *testing.T) {
+				svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+				c, rec := newAntigravityCompatContext(http.MethodPost, "/v1/messages", nil)
+				resp := &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader(sse)),
+				}
+
+				var (
+					res *antigravityStreamResult
+					err error
+				)
+				switch endpoint {
+				case "claude":
+					res, err = svc.handleClaudeStreamToNonStreaming(c, resp, time.Now(), "gemini-4-hydrogen", 256)
+				case "chat":
+					res, err = svc.handleChatCompletionsNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-hydrogen", 256)
+				case "responses":
+					res, err = svc.handleResponsesNonStreamingFromAntigravity(c, resp, time.Now(), "gemini-4-hydrogen", 256)
+				}
+
+				require.NoError(t, err)
+				require.NotNil(t, res)
+				require.Equal(t, 24, res.usage.InputTokens)
+				require.Equal(t, 256, res.usage.OutputTokens)
+				require.Equal(t, http.StatusOK, rec.Code)
+			})
+		}
+	})
+
+	failoverCases := []struct {
+		name            string
+		maxOutputTokens int
+		sse             string
+	}{
+		{
+			name:            "large_budget_4096_max_tokens_thoughts_200_must_failover",
+			maxOutputTokens: 4096,
+			sse:             `data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":1200,"candidatesTokenCount":0,"thoughtsTokenCount":200}}}` + "\n\n",
+		},
+		{
+			name:            "unknown_budget_0_max_tokens_thoughts_200_must_failover",
+			maxOutputTokens: 0,
+			sse:             `data: {"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":1200,"candidatesTokenCount":0,"thoughtsTokenCount":200}}}` + "\n\n",
+		},
+		{
+			name:            "probe_budget_256_stop_thoughts_10_must_failover",
+			maxOutputTokens: 256,
+			sse:             `data: {"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":24,"candidatesTokenCount":0,"thoughtsTokenCount":10}}}` + "\n\n",
+		},
+	}
+
+	for _, tc := range failoverCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, nil)
+			c, rec := newAntigravityCompatContext(http.MethodPost, "/v1/messages", nil)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(tc.sse)),
+			}
+
+			claudeResp, res, err := svc.collectClaudeStreamResponse(c, resp, time.Now(), "gemini-4-hydrogen", tc.maxOutputTokens)
+			require.Nil(t, claudeResp)
+			require.Nil(t, res)
+			require.Empty(t, rec.Body.String())
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+			require.True(t, failoverErr.RetryableOnSameAccount)
+		})
+	}
+
+	t.Run("extractGeminiMaxOutputTokens", func(t *testing.T) {
+		require.Equal(t, 0, extractGeminiMaxOutputTokens(nil))
+		require.Equal(t, 0, extractGeminiMaxOutputTokens([]byte(`{}`)))
+		require.Equal(t, 0, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":0}}}`)))
+		require.Equal(t, 0, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":-1}}}`)))
+		require.Equal(t, 0, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":256.5}}}`)))
+		require.Equal(t, 0, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":"256"}}}`)))
+		require.Equal(t, 256, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":256}}}`)))
+		require.Equal(t, 4096, extractGeminiMaxOutputTokens([]byte(`{"request":{"generationConfig":{"maxOutputTokens":4096}}}`)))
+	})
+}
+
+func TestAntigravityCompatStreamSession_ConsumeTracksDiagnosticsWithoutPollutingUsage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	writer := newAntigravityClientWriter(c.Writer, c.Writer.(http.Flusher), "test")
+
+	zeroSession := newAntigravityCompatStreamSession(
+		"gemini-4-hydrogen",
+		time.Time{},
+		newAntigravityChatStreamAdapter("gemini-4-hydrogen", true),
+		writer,
+	)
+	require.Equal(t, int64(0), zeroSession.elapsedMs())
+
+	session := newAntigravityCompatStreamSession(
+		"gemini-4-hydrogen",
+		time.Now().Add(-50*time.Millisecond),
+		newAntigravityChatStreamAdapter("gemini-4-hydrogen", true),
+		writer,
+	)
+	require.GreaterOrEqual(t, session.elapsedMs(), int64(0))
+
+	// Non-data lines do not increment seenLines.
+	session.consume(": ping")
+	session.consume("")
+	session.consume("data: [DONE]")
+	require.Equal(t, 0, session.seenLines)
+
+	// Frame 1: no usageMetadata -> message_start initializes usage with 0/0.
+	session.consume(`data: {"response":{"candidates":[{"content":{"parts":[]}}]}}`)
+	require.Equal(t, 1, session.seenLines)
+	require.Equal(t, int64(0), session.lastPromptTokens)
+	require.Equal(t, int64(0), session.lastCandidatesTokens)
+	require.Equal(t, int64(0), session.lastThoughtsTokens)
+	require.Equal(t, &ClaudeUsage{}, session.usage)
+
+	// Frame 2: usageMetadata without finishReason -> diagnostics update, s.usage stays untouched.
+	session.consume(`data: {"response":{"usageMetadata":{"promptTokenCount":34578,"candidatesTokenCount":0,"thoughtsTokenCount":2112}}}`)
+	require.Equal(t, 2, session.seenLines)
+	require.Equal(t, int64(34578), session.lastPromptTokens)
+	require.Equal(t, int64(0), session.lastCandidatesTokens)
+	require.Equal(t, int64(2112), session.lastThoughtsTokens)
+	require.Equal(t, &ClaudeUsage{}, session.usage, "diagnostic tracking must not touch or pollute s.usage")
+
+	// Frame 3: blockReason and updated usageMetadata without finishReason.
+	session.consume(`data: {"response":{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":34578,"candidatesTokenCount":7,"thoughtsTokenCount":2500}}}`)
+	require.Equal(t, 3, session.seenLines)
+	require.Equal(t, "SAFETY", session.lastBlockReason)
+	require.Equal(t, int64(34578), session.lastPromptTokens)
+	require.Equal(t, int64(7), session.lastCandidatesTokens)
+	require.Equal(t, int64(2500), session.lastThoughtsTokens)
+	require.Equal(t, &ClaudeUsage{}, session.usage, "diagnostic tracking must not touch or pollute s.usage")
 }

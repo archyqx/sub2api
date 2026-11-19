@@ -124,6 +124,9 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
+	if claudeRequest.MaxTokens > antigravityCompatMaxTokens {
+		claudeRequest.MaxTokens = antigravityCompatMaxTokens
+	}
 	claudeRequest.Stream = request.Stream
 	claudeBody, err := json.Marshal(claudeRequest)
 	if err != nil {
@@ -504,10 +507,11 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatSuccess(
 		return s.handleResponsesStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
 	}
 
+	effectiveMaxOutputTokens := extractGeminiMaxOutputTokens(call.geminiBody)
 	if call.request.protocol == antigravityCompatChatCompletions {
-		return s.handleChatCompletionsNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
+		return s.handleChatCompletionsNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
 	}
-	return s.handleResponsesNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
+	return s.handleResponsesNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
 }
 
 func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
@@ -630,8 +634,9 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	resp *http.Response,
 	startTime time.Time,
 	originalModel string,
+	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
@@ -649,8 +654,9 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	resp *http.Response,
 	startTime time.Time,
 	originalModel string,
+	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}

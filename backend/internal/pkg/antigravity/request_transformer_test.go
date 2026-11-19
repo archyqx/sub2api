@@ -772,11 +772,13 @@ func TestApplyGeminiReasoningMinMaxOutputTokens(t *testing.T) {
 		{model: "gemini-4-hydrogen", maxTokens: 0, want: 0},
 		{model: "gemini-4-hydrogen", maxTokens: 1, want: 256},
 		{model: "gemini-4-hydrogen", maxTokens: 8, want: 256},
-		{model: "gemini-4-hydrogen", maxTokens: 9, want: 1024},
-		{model: "gemini-4-hydrogen-medium", maxTokens: 64, want: 1024},
-		{model: "gemini-4-carbon-high", maxTokens: 1023, want: 1024},
-		{model: "gemini-3.8-flash", maxTokens: 1024, want: 1024},
+		{model: "gemini-4-hydrogen", maxTokens: 9, want: 4096},
+		{model: "gemini-4-hydrogen-medium", maxTokens: 64, want: 4096},
+		{model: "gemini-4-carbon-high", maxTokens: 1023, want: 4096},
+		{model: "gemini-3.8-flash", maxTokens: 1024, want: 4096},
+		{model: "gemini-3.8-flash", maxTokens: 4095, want: 4096},
 		{model: "gemini-2.5-pro", maxTokens: 4096, want: 4096},
+		{model: "gemini-4-hydrogen-high", maxTokens: 8192, want: 8192},
 	}
 
 	for _, tt := range tests {
@@ -810,29 +812,39 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 				MaxTokens: 64,
 				Thinking:  &ThinkingConfig{Type: "enabled"},
 			})
-			require.Equal(t, 1024, cfgLight.MaxOutputTokens)
+			require.Equal(t, 4096, cfgLight.MaxOutputTokens)
 			require.NotNil(t, cfgLight.ThinkingConfig)
 			require.Equal(t, -1, cfgLight.ThinkingConfig.ThinkingBudget)
 		}
 	})
 
-	t.Run("explicit positive budget larger than 1024 preserves budget+padding", func(t *testing.T) {
+	t.Run("explicit positive budget below floor still floors to 4096", func(t *testing.T) {
 		cfg := buildGenerationConfig(&ClaudeRequest{
 			Model:     "gemini-4-hydrogen-high",
 			MaxTokens: 64,
 			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 2048},
 		})
-		require.Equal(t, 2048+MaxTokensBudgetPadding, cfg.MaxOutputTokens)
+		require.Equal(t, 4096, cfg.MaxOutputTokens)
 		require.Greater(t, cfg.MaxOutputTokens, cfg.ThinkingConfig.ThinkingBudget)
 	})
 
-	t.Run("small positive budget with max_tokens > budget still floors to 1024", func(t *testing.T) {
+	t.Run("explicit positive budget at or above floor preserves budget+padding", func(t *testing.T) {
+		cfg := buildGenerationConfig(&ClaudeRequest{
+			Model:     "gemini-4-hydrogen-high",
+			MaxTokens: 64,
+			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 4096},
+		})
+		require.Equal(t, 4096+MaxTokensBudgetPadding, cfg.MaxOutputTokens)
+		require.Greater(t, cfg.MaxOutputTokens, cfg.ThinkingConfig.ThinkingBudget)
+	})
+
+	t.Run("small positive budget with max_tokens > budget still floors to 4096", func(t *testing.T) {
 		cfg := buildGenerationConfig(&ClaudeRequest{
 			Model:     "gemini-4-hydrogen-low",
 			MaxTokens: 500,
 			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 200},
 		})
-		require.Equal(t, 1024, cfg.MaxOutputTokens)
+		require.Equal(t, 4096, cfg.MaxOutputTokens)
 		require.Greater(t, cfg.MaxOutputTokens, cfg.ThinkingConfig.ThinkingBudget)
 	})
 

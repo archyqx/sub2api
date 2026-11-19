@@ -630,15 +630,15 @@ func TestAntigravityCompatPreservesChatTokenLimit(t *testing.T) {
 			want: 256,
 		},
 		{
-			name: "reasoning gemini max_completion_tokens takes precedence and floors <1024 to 1024",
+			name: "reasoning gemini max_completion_tokens takes precedence and floors <4096 to 4096",
 			body: `{"model":"gemini-3.1-pro-high","messages":[{"role":"user","content":"ok"}],"max_tokens":8,"max_completion_tokens":13}`,
-			want: 1024,
+			want: 4096,
 		},
 		{
-			name:         "reasoning gemini-4-hydrogen lightweight max_tokens=64 floors to 1024",
+			name:         "reasoning gemini-4-hydrogen lightweight max_tokens=64 floors to 4096",
 			body:         `{"model":"gemini-4-hydrogen","messages":[{"role":"user","content":"ok"}],"max_tokens":64}`,
 			extraMapping: map[string]any{"gemini-4-hydrogen": "gemini-4-hydrogen"},
-			want:         1024,
+			want:         4096,
 		},
 		{
 			name: "max_tokens at safe ceiling is preserved",
@@ -700,14 +700,29 @@ func TestAntigravityCompatResponsesFloorsGeminiReasoningMaxOutputTokens(t *testi
 			want: 256,
 		},
 		{
-			name: "gemini-4-hydrogen max_output_tokens=64 floors to 1024",
+			name: "gemini-4-hydrogen max_output_tokens=64 floors to 4096",
 			body: `{"model":"gemini-4-hydrogen","input":"ok","max_output_tokens":64}`,
-			want: 1024,
+			want: 4096,
 		},
 		{
-			name: "gemini-4-hydrogen max_output_tokens=2048 unchanged",
+			name: "gemini-4-hydrogen max_output_tokens=2048 floors to 4096",
 			body: `{"model":"gemini-4-hydrogen","input":"ok","max_output_tokens":2048}`,
-			want: 2048,
+			want: 4096,
+		},
+		{
+			name: "gemini-4-hydrogen max_output_tokens=4096 unchanged",
+			body: `{"model":"gemini-4-hydrogen","input":"ok","max_output_tokens":4096}`,
+			want: 4096,
+		},
+		{
+			name: "gemini-4-hydrogen max_output_tokens=64001 clamped to 64000",
+			body: `{"model":"gemini-4-hydrogen","input":"ok","max_output_tokens":64001}`,
+			want: 64000,
+		},
+		{
+			name: "gemini-4-hydrogen max_output_tokens=100000 clamped to 64000",
+			body: `{"model":"gemini-4-hydrogen","input":"ok","max_output_tokens":100000}`,
+			want: 64000,
 		},
 		{
 			name: "non-reasoning gemini-2.5-flash max_output_tokens=64 unchanged",

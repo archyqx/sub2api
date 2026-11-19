@@ -34,7 +34,7 @@ func TestAntigravityMalformedFunctionCallNonStreaming(t *testing.T) {
 				if protocol == "chat" {
 					handle = svc.handleChatCompletionsNonStreamingFromAntigravity
 				}
-				_, err := handle(c, resp, time.Now(), "test-model")
+				_, err := handle(c, resp, time.Now(), "test-model", 0)
 				require.Equal(t, tc.status, recorder.Code)
 				if tc.status == http.StatusBadGateway {
 					require.Error(t, err)
