@@ -1036,13 +1036,21 @@ const getAntigravityUsageFromAPI = (
   }
 }
 
-// Gemini 3 Pro from API
+// Gemini 3 Pro / Gemini 4 Pro from API
 const antigravity3ProUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI(['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview'])
+  getAntigravityUsageFromAPI([
+    'gemini-4-hydrogen-high', 'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low', 'gemini-4-hydrogen',
+    'gemini-4-carbon', 'gemini-4-carbon-high', 'gemini-4-carbon-medium', 'gemini-4-carbon-low',
+    'gemini-4-neon-xhigh', 'gemini-4-neon-high', 'gemini-4-neon-medium', 'gemini-4-neon-low', 'gemini-4-neon',
+    'gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low', 'gemini-4-argon',
+    'gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview'
+  ])
 )
 
 // Gemini 3 Flash from API
-const antigravity3FlashUsageFromAPI = computed(() => getAntigravityUsageFromAPI(['gemini-3-flash']))
+const antigravity3FlashUsageFromAPI = computed(() =>
+  getAntigravityUsageFromAPI(['gemini-3.8-flash', 'gemini-3-flash'])
+)
 
 // Gemini Image from API
 const antigravity3ImageUsageFromAPI = computed(() =>
@@ -1052,6 +1060,7 @@ const antigravity3ImageUsageFromAPI = computed(() =>
 // Claude from API (all Claude model variants)
 const antigravityClaudeUsageFromAPI = computed(() =>
   getAntigravityUsageFromAPI([
+    'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-5',
     'claude-fable-5-1',
     'claude-fable-5',
     'claude-sonnet-4-5', 'claude-opus-4-5-thinking',

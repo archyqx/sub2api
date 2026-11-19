@@ -212,6 +212,20 @@ func TestGetMappedModelResolvesBareGeminiModelForAllEntrypoints(t *testing.T) {
 		require.Equal(t, "gemini-3.8-flash-low", svc.getMappedModel(account, "gemini-3.8-flash-low"))
 	})
 
+	t.Run("xhigh effort prefers -xhigh variant and falls back to -high", func(t *testing.T) {
+		neonAccount := newAntigravityAccountWithMapping(map[string]string{
+			"gemini-4-neon-xhigh":    "gemini-4-neon-xhigh",
+			"gemini-4-neon-high":     "gemini-4-neon-high",
+			"gemini-4-hydrogen-high": "gemini-4-hydrogen-high",
+			"gemini-4-argon-high":    "gemini-4-argon-high",
+		})
+		require.Equal(t, "xhigh", geminiThinkingLevelFromBody([]byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"xhigh"}}}`)))
+		require.Equal(t, "xhigh", geminiThinkingLevelFromClaudeBody([]byte(`{"output_config":{"effort":"xhigh"}}`), nil))
+		require.Equal(t, "gemini-4-neon-xhigh", svc.getMappedModelForThinkingLevel(neonAccount, "gemini-4-neon", "xhigh"))
+		require.Equal(t, "gemini-4-hydrogen-high", svc.getMappedModelForThinkingLevel(neonAccount, "gemini-4-hydrogen", "xhigh"))
+		require.Equal(t, "gemini-4-argon-high", svc.getMappedModelForThinkingLevel(neonAccount, "gemini-4-argon", "xhigh"))
+	})
+
 	t.Run("unsupported model still reports unsupported", func(t *testing.T) {
 		require.Empty(t, svc.getMappedModel(account, "gemini-9.9-flash"))
 	})

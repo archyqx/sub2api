@@ -530,6 +530,38 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).not.toContain('gemini3Flash')
   })
 
+  it('Antigravity falls back to Gemini 4 and Claude 5.5 per-model bars when quota groups are absent', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'gemini-4-hydrogen-high': { utilization: 12, reset_time: '2026-11-20T10:00:00Z' },
+        'claude-opus-5-5': { utilization: 34, reset_time: '2026-11-21T10:00:00Z' }
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1004, platform: 'antigravity', type: 'oauth', extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const bars = wrapper.findAll('.usage-bar').map((bar) => bar.text())
+    expect(bars).toEqual([
+      'admin.accounts.usageWindow.gemini3Pro|12|2026-11-20T10:00:00Z',
+      'admin.accounts.usageWindow.claude|34|2026-11-21T10:00:00Z'
+    ])
+  })
+
   it('Antigravity query button refreshes past the server cache', async () => {
     const first = {
       antigravity_quota_groups: [

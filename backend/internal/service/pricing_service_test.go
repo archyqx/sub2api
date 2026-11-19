@@ -868,6 +868,54 @@ func TestDefaultPricingIncludesGemini4HydrogenRates(t *testing.T) {
 	require.Contains(t, pricingSvc.ListModelNamesByProvider("gemini"), "gemini-4-hydrogen")
 }
 
+func TestBillingService_Gemini4NeonFallbackIsBillable(t *testing.T) {
+	svc := NewBillingService(&config.Config{}, nil)
+	tokens := UsageTokens{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, tc := range []struct {
+		model               string
+		serviceTier         string
+		input, output, read float64
+	}{
+		{"gemini-4-neon", "", 3.0, 15.0, 0.15},
+		{"models/gemini-4-neon", "", 3.0, 15.0, 0.15},
+		{"gemini-4-neon-xhigh", "", 3.0, 15.0, 0.15},
+		{"gemini-4-neon", "priority", 5.4, 27.0, 0.27},
+	} {
+		t.Run(tc.model+"/"+tc.serviceTier, func(t *testing.T) {
+			cost, err := svc.CalculateCostWithServiceTier(tc.model, tokens, 1, tc.serviceTier)
+			require.NoError(t, err)
+			require.InDelta(t, tc.input, cost.InputCost, 1e-12)
+			require.InDelta(t, tc.output, cost.OutputCost, 1e-12)
+			require.InDelta(t, tc.read, cost.CacheReadCost, 1e-12)
+			require.InDelta(t, tc.input+tc.output+tc.read, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
+func TestDefaultPricingIncludesGemini4NeonRates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
+	require.NoError(t, err)
+
+	pricingSvc := &PricingService{}
+	pricingData, err := pricingSvc.parsePricingData(data)
+	require.NoError(t, err)
+	pricingSvc.pricingData = pricingData
+
+	pricing := pricingSvc.GetModelPricing("gemini-4-neon")
+	require.NotNil(t, pricing)
+	require.Equal(t, "gemini", pricing.LiteLLMProvider)
+	require.InDelta(t, 3e-6, pricing.InputCostPerToken, 1e-15)
+	require.InDelta(t, 15e-6, pricing.OutputCostPerToken, 1e-15)
+	require.InDelta(t, 0.15e-6, pricing.CacheReadInputTokenCost, 1e-15)
+	require.InDelta(t, 5.4e-6, pricing.InputCostPerTokenPriority, 1e-15)
+	require.InDelta(t, 27e-6, pricing.OutputCostPerTokenPriority, 1e-15)
+	require.InDelta(t, 0.27e-6, pricing.CacheReadInputTokenCostPriority, 1e-15)
+	require.Contains(t, pricingSvc.ListModelNamesByProvider("gemini"), "gemini-4-neon")
+	require.NotNil(t, pricingSvc.GetModelPricing("gemini-4-neon-xhigh"))
+	require.NotNil(t, pricingSvc.GetModelPricing("gemini-4-hydrogen-xhigh"))
+}
+
 func TestDefaultPricingIncludesGrok47FastRates(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "resources", "model-pricing", "model_prices_and_context_window.json"))
 	require.NoError(t, err)

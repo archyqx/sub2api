@@ -98,7 +98,9 @@ func parseClaudeThinkingIntent(claudeBody []byte) claudeThinkingIntent {
 		intent.tier = "low"
 	case "medium":
 		intent.tier = "medium"
-	case "high", "xhigh", "max":
+	case "xhigh":
+		intent.tier = "xhigh"
+	case "high", "max":
 		intent.tier = "high"
 	}
 	if intent.thinkingType == "enabled" {
@@ -134,10 +136,15 @@ func geminiThinkingLevelFor(model string, intent claudeThinkingIntent) string {
 	}
 	name := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model)), "models/")
 	isFlash := strings.Contains(name, "flash")
+	supportsMedium := isFlash || strings.HasPrefix(name, "gemini-3.1-pro") || name == "gemini-4-carbon" || name == "gemini-4-hydrogen" || name == "gemini-4-neon"
+	supportsXHigh := name == "gemini-4-hydrogen" || name == "gemini-4-neon"
 	if tier == "minimal" && !isFlash {
 		tier = "low"
 	}
-	if tier == "medium" && !isFlash && !strings.HasPrefix(name, "gemini-3.1-pro") && name != "gemini-4-carbon" {
+	if tier == "xhigh" && !supportsXHigh {
+		tier = "high"
+	}
+	if tier == "medium" && !supportsMedium {
 		tier = "high"
 	}
 	return tier
@@ -166,7 +173,7 @@ func geminiThinkingBudgetFor(model string, intent claudeThinkingIntent) (budget 
 		budget = 1024
 	case "medium":
 		budget = 8192
-	case "high":
+	case "high", "xhigh":
 		budget = maxBudget
 	default:
 		if intent.budgetTokens <= 0 {

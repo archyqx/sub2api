@@ -238,6 +238,30 @@ describe('useModelWhitelist', () => {
     ]))
   })
 
+  it('Gemini 4 Neon and Hydrogen expose expected models and preset mappings', () => {
+    const geminiModels = getModelsByPlatform('gemini')
+    expect(geminiModels).toContain('gemini-4-neon')
+    expect(geminiModels).toContain('gemini-4-hydrogen')
+
+    const agModels = getModelsByPlatform('antigravity')
+    expect(agModels).toEqual(expect.arrayContaining([
+      'gemini-4-neon-low',
+      'gemini-4-neon-medium',
+      'gemini-4-neon-high',
+      'gemini-4-neon-xhigh',
+      'gemini-4-hydrogen-low',
+      'gemini-4-hydrogen-medium',
+      'gemini-4-hydrogen-high'
+    ]))
+
+    expect(getPresetMappingsByPlatform('antigravity')).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: 'gemini-4-neon', to: 'gemini-4-neon-high' }),
+      expect.objectContaining({ from: 'gemini-4-neon-xhigh', to: 'gemini-4-neon-xhigh' }),
+      expect.objectContaining({ from: 'gemini-4-hydrogen', to: 'gemini-4-hydrogen-high' }),
+      expect.objectContaining({ from: 'gemini-4-hydrogen-high', to: 'gemini-4-hydrogen-high' })
+    ]))
+  })
+
   it('whitelist 模式会忽略通配符条目', () => {
     const mapping = buildModelMappingObject('whitelist', ['claude-*', 'gemini-3.1-flash-image'], [])
     expect(mapping).toEqual({

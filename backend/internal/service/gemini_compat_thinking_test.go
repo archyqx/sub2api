@@ -50,6 +50,12 @@ func TestApplyGeminiCompatThinkingConfig(t *testing.T) {
 		{name: "carbon medium budget", model: "gemini-4-carbon", claudeBody: `{"thinking":{"type":"enabled","budget_tokens":4096}}`, wantLevel: "medium"},
 		{name: "carbon cannot disable thinking", model: "gemini-4-carbon", claudeBody: `{"thinking":{"type":"disabled"}}`, wantLevel: "low"},
 		{name: "carbon preserves upstream default", model: "gemini-4-carbon", claudeBody: `{}`, wantNoConfig: true},
+		{name: "hydrogen xhigh", model: "gemini-4-hydrogen", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "xhigh"},
+		{name: "hydrogen medium", model: "gemini-4-hydrogen", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "medium"},
+		{name: "neon xhigh", model: "models/gemini-4-neon", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "xhigh"},
+		{name: "neon medium", model: "gemini-4-neon", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "medium"},
+		{name: "xhigh outside hydrogen/neon becomes high", model: "gemini-3.7-flash", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "high"},
+		{name: "2.5 pro xhigh maps to max budget", model: "gemini-2.5-pro", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantBudget: budget(32768)},
 		{name: "gemini 4 uses level", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"low"}}`, wantLevel: "low"},
 		{name: "medium outside verified models becomes high", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "high"},
 		{name: "medium budget outside verified models becomes high", model: "gemini-4-argon", claudeBody: `{"thinking":{"type":"enabled","budget_tokens":4096}}`, wantLevel: "high"},
@@ -271,10 +277,17 @@ func TestConvertClaudeMessagesToGemini_DropsHistoryThinkingBlocks(t *testing.T) 
 	require.NotContains(t, string(out), "opaque")
 
 	contents := gjson.GetBytes(out, "contents").Array()
-	require.Len(t, contents, 4)
+	// Dropping the thinking-only assistant turn leaves consecutive user turns ("again", "last"),
+	// which convertClaudeMessagesToGeminiContents merges into a single user turn to preserve alternating roles.
+	require.Len(t, contents, 3)
+	require.Equal(t, "user", contents[0].Get("role").String())
 	require.Equal(t, "model", contents[1].Get("role").String())
 	require.Len(t, contents[1].Get("parts").Array(), 1)
 	require.Equal(t, "Hello", contents[1].Get("parts.0.text").String())
+	require.Equal(t, "user", contents[2].Get("role").String())
+	require.Len(t, contents[2].Get("parts").Array(), 2)
+	require.Equal(t, "again", contents[2].Get("parts.0.text").String())
+	require.Equal(t, "last", contents[2].Get("parts.1.text").String())
 	for i, content := range contents {
 		require.NotEmpty(t, content.Get("parts").Array(), "contents[%d] has empty parts", i)
 	}
