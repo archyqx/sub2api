@@ -309,6 +309,7 @@ var systemIdentityOpeners = []*regexp.Regexp{
 // Only Antigravity forwarding should use this; native Anthropic may require attribution.
 func NeutralizeSystemIdentity(text string) string {
 	text = stripClaudeAttribution(text)
+	text = ApplyCustomSanitizeRules(text)
 	for _, re := range systemIdentityOpeners {
 		if loc := re.FindStringIndex(text); loc != nil {
 			if strings.HasPrefix(text[loc[1]:], ",") {
