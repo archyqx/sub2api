@@ -1,8 +1,11 @@
 package antigravity
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestStreamingProcessorResponseShapesPreserveContent(t *testing.T) {
@@ -72,4 +75,81 @@ func TestStreamingProcessorResponseShapesPreserveUsageWithoutContent(t *testing.
 			}
 		})
 	}
+}
+
+func TestStreamingProcessor_SignedTextAndGroundingMarkHasContent(t *testing.T) {
+	t.Run("signed non-empty text marks HasContent", func(t *testing.T) {
+		p := NewStreamingProcessor("gemini-4-hydrogen")
+		line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"signed reply","thoughtSignature":"sig-123"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4}}}`
+		events := p.ProcessLine(line)
+		finalEvents, _ := p.Finish()
+		events = append(events, finalEvents...)
+		require.True(t, p.HasContent())
+		require.Contains(t, string(events), "signed reply")
+		require.Contains(t, string(events), "sig-123")
+	})
+
+	t.Run("grounding-only with finishReason marks HasContent", func(t *testing.T) {
+		p := NewStreamingProcessor("gemini-4-hydrogen")
+		line := `data: {"response":{"candidates":[{"groundingMetadata":{"webSearchQueries":["sub2api"]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4}}}`
+		events := p.ProcessLine(line)
+		finalEvents, _ := p.Finish()
+		events = append(events, finalEvents...)
+		require.True(t, p.HasContent())
+		require.Contains(t, string(events), "sub2api")
+	})
+
+	t.Run("grounding-only without finishReason marks HasContent on Finish", func(t *testing.T) {
+		p := NewStreamingProcessor("gemini-4-hydrogen")
+		line := `data: {"response":{"candidates":[{"groundingMetadata":{"webSearchQueries":["golang"]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4}}}`
+		events := p.ProcessLine(line)
+		require.False(t, p.HasContent())
+		finalEvents, _ := p.Finish()
+		events = append(events, finalEvents...)
+		require.True(t, p.HasContent())
+		require.Contains(t, string(events), "golang")
+	})
+
+	t.Run("empty text with signature does not mark HasContent", func(t *testing.T) {
+		p := NewStreamingProcessor("gemini-4-hydrogen")
+		line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig-only"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":0}}}`
+		_ = p.ProcessLine(line)
+		_, _ = p.Finish()
+		require.False(t, p.HasContent())
+	})
+}
+
+func TestNonStreamingProcessor_FlushesPlainTextBeforeSignedText(t *testing.T) {
+	raw := []byte(`{
+		"response": {
+			"responseId": "resp_order_1",
+			"candidates": [{
+				"content": {
+					"role": "model",
+					"parts": [
+						{"text": "First chunk, "},
+						{"text": "second chunk.", "thoughtSignature": "sig-tail"}
+					]
+				},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 20, "candidatesTokenCount": 8}
+		}
+	}`)
+
+	claudeBytes, usage, err := TransformGeminiToClaude(raw, "gemini-4-hydrogen")
+	require.NoError(t, err)
+	require.Equal(t, 20, usage.InputTokens)
+	require.Equal(t, 8, usage.OutputTokens)
+
+	var resp ClaudeResponse
+	require.NoError(t, json.Unmarshal(claudeBytes, &resp))
+	require.Len(t, resp.Content, 3)
+	require.Equal(t, "text", resp.Content[0].Type)
+	require.Equal(t, "First chunk, ", resp.Content[0].Text)
+	require.Equal(t, "text", resp.Content[1].Type)
+	require.Equal(t, "second chunk.", resp.Content[1].Text)
+	require.Equal(t, "thinking", resp.Content[2].Type)
+	require.Equal(t, "", resp.Content[2].Thinking)
+	require.Equal(t, "sig-tail", resp.Content[2].Signature)
 }

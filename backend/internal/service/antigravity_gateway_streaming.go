@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type antigravityStreamResult struct {
@@ -361,6 +362,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	var last map[string]any
 	var lastWithParts map[string]any
 	var collectedParts []map[string]any // 收集所有 parts（text、thinking、functionCall、inlineData 等）
+	var meta geminiStreamMetadataTracker
 
 	type scanEvent struct {
 		line string
@@ -463,6 +465,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 				firstTokenMs = &ms
 			}
 
+			meta.observe(parsed)
 			last = parsed
 
 			// 提取 usage
@@ -501,23 +504,18 @@ func (s *AntigravityGatewayService) handleGeminiStreamToNonStreaming(c *gin.Cont
 	}
 
 returnResponse:
-	// 选择最后一个有效响应
-	finalResponse := pickGeminiCollectResult(last, lastWithParts)
-
 	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
 	if last == nil && lastWithParts == nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (gemini non-stream), triggering failover")
-		return nil, &UpstreamFailoverError{
-			StatusCode:             http.StatusBadGateway,
-			ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
-			RetryableOnSameAccount: true,
-		}
+		return nil, newAntigravityEmptyStreamFailoverError(meta.finishReason, meta.blockReason)
 	}
 
-	// 将收集的所有 parts 合并到最终响应中
+	// 选择最后一个有效响应，并合并全部 parts 与尾帧元数据
+	finalResponse := pickGeminiCollectResult(last, lastWithParts)
 	if len(collectedParts) > 0 {
 		finalResponse = mergeCollectedPartsToResponse(finalResponse, collectedParts)
 	}
+	finalResponse = mergeTrailingGeminiMetadata(finalResponse, meta.usageMetadata, meta.finishReason, meta.groundingMetadata)
 
 	respBody, err := json.Marshal(finalResponse)
 	if err != nil {
@@ -526,6 +524,125 @@ returnResponse:
 	c.Data(http.StatusOK, "application/json", respBody)
 
 	return &antigravityStreamResult{usage: usage, firstTokenMs: firstTokenMs}, nil
+}
+
+type geminiStreamMetadataTracker struct {
+	usageMetadata     map[string]any
+	finishReason      string
+	blockReason       string
+	groundingMetadata map[string]any
+}
+
+func (t *geminiStreamMetadataTracker) observe(parsed map[string]any) {
+	if um, ok := parsed["usageMetadata"].(map[string]any); ok && len(um) > 0 {
+		t.usageMetadata = um
+	}
+	if fr := strings.TrimSpace(extractGeminiFinishReason(parsed)); fr != "" {
+		t.finishReason = fr
+	}
+	if pf, ok := parsed["promptFeedback"].(map[string]any); ok {
+		if br, ok := pf["blockReason"].(string); ok && strings.TrimSpace(br) != "" {
+			t.blockReason = strings.TrimSpace(br)
+		}
+	}
+	if candidates, ok := parsed["candidates"].([]any); ok && len(candidates) > 0 {
+		if cand, ok := candidates[0].(map[string]any); ok {
+			if gm, ok := cand["groundingMetadata"].(map[string]any); ok && len(gm) > 0 {
+				t.groundingMetadata = gm
+			}
+		}
+	}
+}
+
+func mergeTrailingGeminiMetadata(
+	response map[string]any,
+	usageMetadata map[string]any,
+	finishReason string,
+	groundingMetadata map[string]any,
+) map[string]any {
+	if response == nil || (len(usageMetadata) == 0 && finishReason == "" && len(groundingMetadata) == 0) {
+		return response
+	}
+	result := make(map[string]any, len(response)+1)
+	for k, v := range response {
+		result[k] = v
+	}
+	if len(usageMetadata) > 0 {
+		result["usageMetadata"] = usageMetadata
+	}
+	if finishReason != "" || len(groundingMetadata) > 0 {
+		origCandidates, _ := result["candidates"].([]any)
+		candidates := make([]any, max(len(origCandidates), 1))
+		copy(candidates, origCandidates)
+		origCand, _ := candidates[0].(map[string]any)
+		cand := make(map[string]any, len(origCand)+2)
+		for k, v := range origCand {
+			cand[k] = v
+		}
+		if finishReason != "" {
+			cand["finishReason"] = finishReason
+		}
+		if len(groundingMetadata) > 0 {
+			cand["groundingMetadata"] = groundingMetadata
+		}
+		candidates[0] = cand
+		result["candidates"] = candidates
+	}
+	return result
+}
+
+const antigravityTinyMaxTokensProbeCeiling = 256
+
+func extractGeminiMaxOutputTokens(geminiBody []byte) int {
+	if len(geminiBody) == 0 {
+		return 0
+	}
+	res := gjson.GetBytes(geminiBody, "request.generationConfig.maxOutputTokens")
+	if !res.Exists() || res.Type != gjson.Number {
+		return 0
+	}
+	val := int(res.Int())
+	if val <= 0 || float64(val) != res.Float() {
+		return 0
+	}
+	return val
+}
+
+func isTinyMaxTokensProbeExhausted(finishReason string, usage *antigravity.ClaudeUsage, maxOutputTokens int) bool {
+	if !strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") || usage == nil {
+		return false
+	}
+	if maxOutputTokens <= 0 || maxOutputTokens > antigravityTinyMaxTokensProbeCeiling {
+		return false
+	}
+	return usage.OutputTokens > 0 && usage.OutputTokens <= antigravityTinyMaxTokensProbeCeiling
+}
+
+func hasSubstantiveClaudeResponseContent(claudeResp []byte) bool {
+	content := gjson.GetBytes(claudeResp, "content")
+	if !content.Exists() || !content.IsArray() {
+		return false
+	}
+	substantive := false
+	content.ForEach(func(_, item gjson.Result) bool {
+		switch item.Get("type").String() {
+		case "tool_use":
+			substantive = true
+			return false
+		case "text":
+			if item.Get("text").String() != "" {
+				substantive = true
+				return false
+			}
+		case "thinking":
+			if item.Get("thinking").String() != "" {
+				substantive = true
+				return false
+			}
+		}
+		return true
+	})
+	return substantive
 }
 
 // getOrCreateGeminiParts 获取 Gemini 响应的 parts 结构，返回深拷贝和更新回调
@@ -763,7 +880,7 @@ func (s *AntigravityGatewayService) writeGoogleError(c *gin.Context, status int,
 
 // collectClaudeStreamResponse 收集上游流式响应，转换为 Claude 非流式格式返回
 // 用于处理客户端非流式请求但上游只支持流式的情况
-func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) ([]byte, *antigravityStreamResult, error) {
+func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string, maxOutputTokens int) ([]byte, *antigravityStreamResult, error) {
 	if upstreamResponseModelObserverFromContext(c) == nil {
 		beginUpstreamResponseModelObservation(c)
 	}
@@ -780,7 +897,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	var last map[string]any
 	var lastWithParts map[string]any
 	var collectedParts []map[string]any // 收集所有 parts（包括 text、thinking、functionCall、inlineData 等）
-	var meaningfulResponse bool
+	var meta geminiStreamMetadataTracker
 
 	type scanEvent struct {
 		line string
@@ -882,6 +999,7 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 				return nil, nil, antigravity.ErrMalformedFunctionCall
 			}
 
+			meta.observe(parsed)
 			last = parsed
 
 			// 保留最后一个有 parts 的响应，并收集所有 parts
@@ -891,9 +1009,6 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 
 				// 收集所有 parts（text、thinking、functionCall、inlineData 等）
 				collectedParts = append(collectedParts, parts...)
-			}
-			if len(parts) > 0 || strings.TrimSpace(extractGeminiFinishReason(parsed)) != "" {
-				meaningfulResponse = true
 				if firstTokenMs == nil {
 					ms := int(time.Since(startTime).Milliseconds())
 					firstTokenMs = &ms
@@ -911,23 +1026,18 @@ func (s *AntigravityGatewayService) collectClaudeStreamResponse(c *gin.Context, 
 	}
 
 returnResponse:
-	// 处理空响应情况 — 触发同账号重试 + failover 切换账号
-	if !meaningfulResponse {
+	// 处理完全无有效帧的情况 — 触发同账号重试 + failover 切换账号
+	if last == nil && lastWithParts == nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] warning: empty stream response (claude non-stream), triggering failover")
-		return nil, nil, &UpstreamFailoverError{
-			StatusCode:             http.StatusBadGateway,
-			ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
-			RetryableOnSameAccount: true,
-		}
+		return nil, nil, newAntigravityEmptyStreamFailoverError(meta.finishReason, meta.blockReason)
 	}
 
-	// 选择最后一个有效响应
+	// 选择最后一个有效响应，并合并全部 parts 与尾帧元数据（usageMetadata / finishReason / groundingMetadata）
 	finalResponse := pickGeminiCollectResult(last, lastWithParts)
-
-	// 将收集的所有 parts 合并到最终响应中
 	if len(collectedParts) > 0 {
 		finalResponse = mergeCollectedPartsToResponse(finalResponse, collectedParts)
 	}
+	finalResponse = mergeTrailingGeminiMetadata(finalResponse, meta.usageMetadata, meta.finishReason, meta.groundingMetadata)
 
 	// 序列化为 JSON（Gemini 格式）
 	geminiBody, err := json.Marshal(finalResponse)
@@ -940,6 +1050,26 @@ returnResponse:
 	if err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] transform_error error=%v body=%s", err, string(geminiBody))
 		return nil, nil, fmt.Errorf("failed to parse upstream response: %w", err)
+	}
+
+	// 校验转换后的 Claude 响应是否包含实质内容（非空 text / tool_use / 非空 thinking），
+	// 防止仅含 finishReason 或空签名壳的响应被放行为 200 content:[] 导致客户端空转重试；
+	// 豁免极小 max_tokens（<=256）连通性/预检探测因隐藏思考耗尽触发的 MAX_TOKENS。
+	if !hasSubstantiveClaudeResponseContent(claudeResp) && !isTinyMaxTokensProbeExhausted(meta.finishReason, agUsage, maxOutputTokens) {
+		logger.LegacyPrintf(
+			"service.antigravity_gateway",
+			"[antigravity-Forward] warning: empty substantive response (claude non-stream): finish_reason=%s block_reason=%s input=%d output=%d, triggering failover",
+			meta.finishReason,
+			meta.blockReason,
+			agUsage.InputTokens,
+			agUsage.OutputTokens,
+		)
+		return nil, nil, newAntigravityEmptyStreamFailoverError(meta.finishReason, meta.blockReason)
+	}
+
+	if firstTokenMs == nil {
+		ms := int(time.Since(startTime).Milliseconds())
+		firstTokenMs = &ms
 	}
 
 	// 转换为 service.ClaudeUsage
@@ -956,8 +1086,8 @@ returnResponse:
 
 // handleClaudeStreamToNonStreaming 收集上游流式响应，转换为 Claude 非流式格式返回
 // 用于处理客户端非流式请求但上游只支持流式的情况
-func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
-	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string, maxOutputTokens int) (*antigravityStreamResult, error) {
+	claudeResp, streamRes, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		var failoverErr *UpstreamFailoverError
 		if errors.As(err, &failoverErr) {
@@ -986,18 +1116,13 @@ func (s *AntigravityGatewayService) handleClaudeStreamToNonStreaming(c *gin.Cont
 
 // handleClaudeStreamingResponse 处理 Claude 流式响应（Gemini SSE → Claude SSE 转换）
 func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context, resp *http.Response, startTime time.Time, originalModel string) (*antigravityStreamResult, error) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-	c.Status(http.StatusOK)
-
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		return nil, errors.New("streaming not supported")
 	}
 
 	processor := antigravity.NewStreamingProcessor(originalModel)
+	streamBuf := newAntigravityClaudeStreamBuffer()
 	var firstTokenMs *int
 	// 使用 Scanner 并限制单行大小，避免 ReadString 无上限导致 OOM
 	scanner := bufio.NewScanner(resp.Body)
@@ -1090,6 +1215,13 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 	lastDataAt := time.Now()
 
 	cw := newAntigravityClientWriter(c.Writer, flusher, "antigravity claude")
+	cw.beforeFirstWrite = func() {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+		c.Status(http.StatusOK)
+	}
 
 	// 仅发送一次错误事件，避免多次写入导致协议混乱
 	errorEventSent := false
@@ -1098,6 +1230,8 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			return
 		}
 		errorEventSent = true
+		cw.prepareFirstWrite()
+		MarkResponseCommitted(c)
 		_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: {\"error\":\"%s\"}\n\n", reason)
 		flusher.Flush()
 	}
@@ -1115,21 +1249,7 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 				queueBudget.release(len(ev.line))
 			}
 			if !ok {
-				// 上游完成，发送结束事件
-				finalEvents, agUsage := processor.Finish()
-				if len(finalEvents) > 0 {
-					cw.Write(finalEvents)
-				} else if !processor.MessageStartSent() && !cw.Disconnected() {
-					// 整个流未收到任何可解析的上游数据（全部 SSE 行均无法被 JSON 解析），
-					// 触发 failover 在同账号重试，避免向客户端发出缺少 message_start 的残缺流
-					logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Claude-Stream] empty stream response (no valid events parsed), triggering failover")
-					return nil, &UpstreamFailoverError{
-						StatusCode:             http.StatusBadGateway,
-						ResponseBody:           []byte(`{"error":"empty stream response from upstream"}`),
-						RetryableOnSameAccount: true,
-					}
-				}
-				return &antigravityStreamResult{usage: convertUsage(agUsage), firstTokenMs: firstTokenMs, clientDisconnect: cw.Disconnected()}, nil
+				return streamBuf.Finish(cw, processor, startTime, &firstTokenMs, convertUsage, sendErrorEvent)
 			}
 			if ev.err != nil {
 				if disconnect, handled := handleStreamReadError(ev.err, cw.Disconnected(), "antigravity claude"); handled {
@@ -1148,14 +1268,15 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			s.observeAntigravityGeminiSSELine(c, ev.line)
 
 			// 处理 SSE 行，转换为 Claude 格式
-			claudeEvents := processor.ProcessLine(strings.TrimRight(ev.line, "\r\n"))
-			if len(claudeEvents) > 0 {
+			trimmedLine := strings.TrimRight(ev.line, "\r\n")
+			streamBuf.ObserveRawLine(trimmedLine)
+			claudeEvents := processor.ProcessLine(trimmedLine)
+			streamBuf.WriteEvents(cw, processor, claudeEvents, func() {
 				if firstTokenMs == nil {
 					ms := int(time.Since(startTime).Milliseconds())
 					firstTokenMs = &ms
 				}
-				cw.Write(claudeEvents)
-			}
+			})
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))
@@ -1174,12 +1295,12 @@ func (s *AntigravityGatewayService) handleClaudeStreamingResponse(c *gin.Context
 			if cw.Disconnected() {
 				continue
 			}
-			if time.Since(lastDataAt) < keepaliveInterval {
+			if !streamBuf.ShouldSendKeepalive(time.Now(), startTime, lastDataAt, keepaliveInterval) {
 				continue
 			}
 			// SSE ping 事件：Anthropic 原生格式，客户端会正确处理，
 			// 同时保持连接活跃防止 Cloudflare Tunnel 等代理断开
-			if !cw.Fprintf("event: ping\ndata: {\"type\": \"ping\"}\n\n") {
+			if !streamBuf.SendKeepalive(cw) {
 				logger.LegacyPrintf("service.antigravity_gateway", "Client disconnected during keepalive ping (antigravity claude), continuing to drain upstream for billing")
 				continue
 			}

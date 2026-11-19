@@ -124,6 +124,9 @@ func (s *AntigravityGatewayService) ForwardAsResponses(
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
+	if claudeRequest.MaxTokens > antigravityCompatMaxTokens {
+		claudeRequest.MaxTokens = antigravityCompatMaxTokens
+	}
 	claudeRequest.Stream = request.Stream
 	claudeBody, err := json.Marshal(claudeRequest)
 	if err != nil {
@@ -317,12 +320,21 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 		if err != nil {
 			return nil, err
 		}
+		body, err = floorAntigravityCompatGeminiMaxOutputTokens(body, mappedModel)
+		if err != nil {
+			return nil, err
+		}
 		body, err = enableMixedGeminiToolInvocations(body)
 		if err != nil {
 			return nil, err
 		}
 		body = ensureGeminiFunctionCallThoughtSignatures(body)
-		body = applyGeminiCompatThinkingConfig(body, claudeBody, mappedModel, claudeRequest != nil && claudeRequest.Stream)
+		body = applyGeminiCompatThinkingConfig(
+			body,
+			claudeBody,
+			mappedModel,
+			claudeRequest != nil && claudeRequest.Stream && claudeRequestRequestsCompatThoughts(claudeBody),
+		)
 		body, err = injectIdentityPatchToGeminiRequest(body)
 		if err != nil {
 			return nil, err
@@ -336,6 +348,33 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	options := s.getClaudeTransformOptions(ctx)
 	options.EnableIdentityPatch = true
 	return antigravity.TransformClaudeToGeminiWithOptions(claudeRequest, projectID, mappedModel, options)
+}
+
+func claudeRequestRequestsCompatThoughts(claudeBody []byte) bool {
+	intent := parseClaudeThinkingIntent(claudeBody)
+	if intent.thinkingType == "enabled" || intent.thinkingType == "adaptive" {
+		return true
+	}
+	if intent.thinkingType == "disabled" {
+		return false
+	}
+	return intent.tier != "" || intent.budgetTokens > 0
+}
+
+func floorAntigravityCompatGeminiMaxOutputTokens(body []byte, mappedModel string) ([]byte, error) {
+	maxTokensResult := gjson.GetBytes(body, "generationConfig.maxOutputTokens")
+	if !maxTokensResult.Exists() || maxTokensResult.Type != gjson.Number {
+		return body, nil
+	}
+	curMax := int(maxTokensResult.Int())
+	if curMax <= 0 || float64(curMax) != maxTokensResult.Float() {
+		return body, nil
+	}
+	floored := antigravity.ApplyGeminiReasoningMinMaxOutputTokens(mappedModel, curMax)
+	if floored <= curMax {
+		return body, nil
+	}
+	return sjson.SetBytes(body, "generationConfig.maxOutputTokens", floored)
 }
 
 // enableMixedGeminiToolInvocations reconciles Antigravity v1internal tool payloads.
@@ -485,10 +524,11 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatSuccess(
 		return s.handleResponsesStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
 	}
 
+	effectiveMaxOutputTokens := extractGeminiMaxOutputTokens(call.geminiBody)
 	if call.request.protocol == antigravityCompatChatCompletions {
-		return s.handleChatCompletionsNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
+		return s.handleChatCompletionsNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
 	}
-	return s.handleResponsesNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel)
+	return s.handleResponsesNonStreamingFromAntigravity(c, resp, call.request.startTime, call.request.originalModel, effectiveMaxOutputTokens)
 }
 
 func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
@@ -611,8 +651,9 @@ func (s *AntigravityGatewayService) handleChatCompletionsNonStreamingFromAntigra
 	resp *http.Response,
 	startTime time.Time,
 	originalModel string,
+	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}
@@ -630,8 +671,9 @@ func (s *AntigravityGatewayService) handleResponsesNonStreamingFromAntigravity(
 	resp *http.Response,
 	startTime time.Time,
 	originalModel string,
+	maxOutputTokens int,
 ) (*antigravityStreamResult, error) {
-	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel)
+	claudeResponse, result, err := s.collectClaudeStreamResponse(c, resp, startTime, originalModel, maxOutputTokens)
 	if err != nil {
 		return nil, s.mapAntigravityCompatCollectionError(c, err)
 	}

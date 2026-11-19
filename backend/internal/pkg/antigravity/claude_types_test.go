@@ -81,22 +81,60 @@ func TestClaudeContentItem_ThinkingAlwaysHasSignature(t *testing.T) {
 func TestIsGeminiReasoningModel_IncludesProAgent(t *testing.T) {
 	t.Parallel()
 
-	if !IsGeminiReasoningModel("gemini-4-carbon") {
-		t.Fatal("expected Carbon to be recognized as a Gemini reasoning model")
+	reasoningModels := []string{
+		"gemini-pro-agent",
+		"gemini-2.5-pro",
+		"gemini-2.5-pro-preview-06-05",
+		"gemini-2.5-flash-thinking",
+		"gemini-3-flash",
+		"gemini-3-pro-low",
+		"gemini-3-pro-high",
+		"gemini-3.1-pro",
+		"gemini-3.1-pro-low",
+		"gemini-3.1-pro-high",
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-low",
+		"gemini-3.8-flash-medium",
+		"gemini-3.8-flash-high",
+		"gemini-4-argon",
+		"gemini-4-argon-high",
+		"gemini-4-hydrogen",
+		"gemini-4-hydrogen-low",
+		"gemini-4-hydrogen-medium",
+		"gemini-4-hydrogen-high",
+		"gemini-4-carbon",
+		"gemini-4-carbon-high",
+		"models/gemini-4-hydrogen-medium",
+		"GEMINI-4-HYDROGEN",
 	}
-	if !IsGeminiReasoningModel("gemini-pro-agent") {
-		t.Fatal("expected gemini-pro-agent to be recognized as a Gemini reasoning model")
+	for _, m := range reasoningModels {
+		if !IsGeminiReasoningModel(m) {
+			t.Fatalf("expected %q to be recognized as a Gemini reasoning model", m)
+		}
 	}
-	if !IsGeminiReasoningModel("gemini-3.8-flash-high") {
-		t.Fatal("expected gemini-3.8-flash-high to be recognized as a Gemini reasoning model")
+
+	nonReasoningModels := []string{
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		"gemini-2.5-flash-image",
+		"gemini-2.5-flash-image-preview",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-flash-image-preview",
+		"gemini-3-pro-image",
+		"gemini-4-image-preview",
+		"gemini-2.5-pro-preview-tts",
+		"gemini-3-flash-tts",
+		"gemini-2.5-flash-native-audio-preview-09-2025",
+		"gemini-3-pro-audio",
+		"gemini-embedding-001",
+		"gemini-4-embedding",
+		"claude-opus-4-6-thinking",
+		"claude-sonnet-4-6",
+		"claude-3-5-sonnet-latest",
 	}
-	if !IsGeminiReasoningModel("gemini-4-argon") {
-		t.Fatal("expected gemini-4-argon to be recognized as a Gemini reasoning model")
-	}
-	if !IsGeminiReasoningModel("gemini-4-argon-high") {
-		t.Fatal("expected gemini-4-argon-high to be recognized as a Gemini reasoning model")
-	}
-	if IsGeminiReasoningModel("gemini-2.5-flash") {
-		t.Fatal("did not expect gemini-2.5-flash to be recognized as a Gemini reasoning model")
+	for _, m := range nonReasoningModels {
+		if IsGeminiReasoningModel(m) {
+			t.Fatalf("did not expect %q to be recognized as a Gemini reasoning model", m)
+		}
 	}
 }

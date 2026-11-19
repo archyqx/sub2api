@@ -27,12 +27,12 @@ func TestCarbonGenerationThinkingLevels(t *testing.T) {
 			var req ClaudeRequest
 			require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
 			req.Model = "gemini-4-carbon"
-			req.MaxTokens = 1000
+			req.MaxTokens = 4096
 			config := buildGenerationConfig(&req)
 			data, err := json.Marshal(config)
 			require.NoError(t, err)
 			require.NotContains(t, string(data), "thinkingBudget")
-			require.Equal(t, 1000, config.MaxOutputTokens, "Carbon budgets must not raise output limits")
+			require.Equal(t, 4096, config.MaxOutputTokens, "Carbon budgets must not raise output limits")
 			if tc.level == "" && !tc.thoughts {
 				require.Nil(t, config.ThinkingConfig)
 				return
