@@ -3674,6 +3674,14 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 		if droppedThinking && len(parts) == 0 {
 			continue
 		}
+		if len(out) > 0 {
+			if prev, ok := out[len(out)-1].(map[string]any); ok && prev["role"] == gRole {
+				if prevParts, ok := prev["parts"].([]any); ok {
+					prev["parts"] = append(prevParts, parts...)
+					continue
+				}
+			}
+		}
 
 		out = append(out, map[string]any{
 			"role":  gRole,

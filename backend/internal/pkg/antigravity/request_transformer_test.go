@@ -814,7 +814,7 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 			})
 			require.Equal(t, 4096, cfgLight.MaxOutputTokens)
 			require.NotNil(t, cfgLight.ThinkingConfig)
-			if !strings.HasPrefix(model, "gemini-4-carbon") {
+			if !strings.HasPrefix(model, "gemini-4-") {
 				require.Equal(t, -1, cfgLight.ThinkingConfig.ThinkingBudget)
 			}
 		}
@@ -822,7 +822,7 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 
 	t.Run("explicit positive budget below floor still floors to 4096", func(t *testing.T) {
 		cfg := buildGenerationConfig(&ClaudeRequest{
-			Model:     "gemini-4-hydrogen-high",
+			Model:     "gemini-3.8-flash",
 			MaxTokens: 64,
 			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 2048},
 		})
@@ -832,7 +832,7 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 
 	t.Run("explicit positive budget at or above floor preserves budget+padding", func(t *testing.T) {
 		cfg := buildGenerationConfig(&ClaudeRequest{
-			Model:     "gemini-4-hydrogen-high",
+			Model:     "gemini-3.8-flash",
 			MaxTokens: 64,
 			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 4096},
 		})
@@ -842,7 +842,7 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 
 	t.Run("small positive budget with max_tokens > budget still floors to 4096", func(t *testing.T) {
 		cfg := buildGenerationConfig(&ClaudeRequest{
-			Model:     "gemini-4-hydrogen-low",
+			Model:     "gemini-3.8-flash-low",
 			MaxTokens: 500,
 			Thinking:  &ThinkingConfig{Type: "enabled", BudgetTokens: 200},
 		})
@@ -856,5 +856,133 @@ func TestBuildGenerationConfig_GeminiReasoningFloorAndBudgetInteraction(t *testi
 
 		cfgOver := buildGenerationConfig(&ClaudeRequest{Model: "gemini-4-hydrogen", MaxTokens: 90000})
 		require.Equal(t, maxOutputTokensUpperBound, cfgOver.MaxOutputTokens)
+	})
+}
+
+func TestIsWebSearchTool_CustomSchemaPassedAsClientFunction(t *testing.T) {
+	t.Run("custom web_search with input_schema stays client function tool", func(t *testing.T) {
+		req := &ClaudeRequest{
+			Model:    "gemini-4-hydrogen-high",
+			Messages: []ClaudeMessage{{Role: "user", Content: json.RawMessage(`"search docs"`)}},
+			Tools: []ClaudeTool{
+				{
+					Name:        "web_search",
+					Description: "Custom search tool",
+					InputSchema: map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"query": map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+		}
+		body, err := TransformClaudeToGeminiWithOptions(req, "proj", "gemini-4-hydrogen-high", DefaultTransformOptions())
+		require.NoError(t, err)
+
+		var v1 V1InternalRequest
+		require.NoError(t, json.Unmarshal(body, &v1))
+		require.Equal(t, "agent", v1.RequestType)
+		require.Equal(t, "gemini-4-hydrogen-high", v1.Model)
+		require.Len(t, v1.Request.Tools, 1)
+		require.Nil(t, v1.Request.Tools[0].GoogleSearch)
+		require.Len(t, v1.Request.Tools[0].FunctionDeclarations, 1)
+		require.Equal(t, "web_search", v1.Request.Tools[0].FunctionDeclarations[0].Name)
+	})
+
+	t.Run("type=custom named web_search is not treated as built-in", func(t *testing.T) {
+		tool := ClaudeTool{
+			Type: "custom",
+			Name: "web_search",
+			Custom: &CustomToolSpec{
+				Description: "MCP web search",
+				InputSchema: map[string]any{"type": "object"},
+			},
+		}
+		require.False(t, isWebSearchTool(tool))
+	})
+
+	t.Run("built-in web_search without schema uses web_search fallback", func(t *testing.T) {
+		require.True(t, isWebSearchTool(ClaudeTool{Type: "web_search_20250305", Name: "web_search"}))
+		require.True(t, isWebSearchTool(ClaudeTool{Name: "web_search"}))
+	})
+}
+
+func TestBuildContents_MergesAdjacentSameRoleAfterSkippingEmpty(t *testing.T) {
+	messages := []ClaudeMessage{
+		{Role: "user", Content: json.RawMessage(`"first user"`)},
+		{Role: "assistant", Content: json.RawMessage(`[{"type":"text","text":"   "}]`)},
+		{Role: "user", Content: json.RawMessage(`"second user"`)},
+	}
+
+	contents, _, _, err := buildContents(messages, map[string]string{}, false, true, true)
+	require.NoError(t, err)
+	require.Len(t, contents, 1)
+	require.Equal(t, "user", contents[0].Role)
+	require.Len(t, contents[0].Parts, 2)
+	require.Equal(t, "first user", contents[0].Parts[0].Text)
+	require.Equal(t, "second user", contents[0].Parts[1].Text)
+}
+
+func TestGemini4ThinkingConfig_AllModelsAndNoZeroBudget(t *testing.T) {
+	for _, model := range []string{"gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen", "gemini-4-neon"} {
+		t.Run(model+"/effort_mapping", func(t *testing.T) {
+			cfg := buildGenerationConfig(&ClaudeRequest{
+				Model:        model,
+				MaxTokens:    4096,
+				OutputConfig: &ClaudeOutputConfig{Effort: "medium"},
+			})
+			require.NotNil(t, cfg.ThinkingConfig)
+			require.Equal(t, "medium", cfg.ThinkingConfig.ThinkingLevel)
+			require.Zero(t, cfg.ThinkingConfig.ThinkingBudget)
+
+			raw, err := json.Marshal(cfg)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "thinkingBudget")
+		})
+
+		t.Run(model+"/xhigh_support", func(t *testing.T) {
+			cfg := buildGenerationConfig(&ClaudeRequest{
+				Model:        model,
+				MaxTokens:    4096,
+				OutputConfig: &ClaudeOutputConfig{Effort: "xhigh"},
+			})
+			require.NotNil(t, cfg.ThinkingConfig)
+			if model == "gemini-4-hydrogen" || model == "gemini-4-neon" {
+				require.Equal(t, "xhigh", cfg.ThinkingConfig.ThinkingLevel)
+			} else {
+				require.Equal(t, "high", cfg.ThinkingConfig.ThinkingLevel)
+			}
+		})
+
+		t.Run(model+"/disabled_never_emits_zero_budget", func(t *testing.T) {
+			cfg := buildGenerationConfig(&ClaudeRequest{
+				Model:     model,
+				MaxTokens: 4096,
+				Thinking:  &ThinkingConfig{Type: "disabled"},
+			})
+			require.NotNil(t, cfg.ThinkingConfig)
+			require.Equal(t, "low", cfg.ThinkingConfig.ThinkingLevel)
+			raw, err := json.Marshal(cfg)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "thinkingBudget")
+		})
+	}
+
+	t.Run("tiered gemini-4 models do not repeat thinkingLevel", func(t *testing.T) {
+		for _, model := range []string{"gemini-4-carbon-high", "gemini-4-argon-medium", "gemini-4-hydrogen-low", "gemini-4-neon-xhigh"} {
+			cfg := buildGenerationConfig(&ClaudeRequest{
+				Model:        model,
+				MaxTokens:    4096,
+				Thinking:     &ThinkingConfig{Type: "enabled", BudgetTokens: 8192},
+				OutputConfig: &ClaudeOutputConfig{Effort: "low"},
+			})
+			require.NotNil(t, cfg.ThinkingConfig)
+			require.True(t, cfg.ThinkingConfig.IncludeThoughts)
+			require.Empty(t, cfg.ThinkingConfig.ThinkingLevel)
+			raw, err := json.Marshal(cfg)
+			require.NoError(t, err)
+			require.NotContains(t, string(raw), "thinkingBudget")
+		}
 	})
 }

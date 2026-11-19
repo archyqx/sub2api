@@ -1699,3 +1699,45 @@ func TestAntigravityCompatStream_TrailingGroundingWithoutFinishReasonEmitsOnEOF(
 		})
 	}
 }
+
+func TestConvertClaudeMessagesToGeminiContents_MergesAdjacentSameRoleAfterThinkingDrop(t *testing.T) {
+	messages := []any{
+		map[string]any{"role": "user", "content": "first"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "thinking", "thinking": "hidden only"},
+		}},
+		map[string]any{"role": "user", "content": "second"},
+	}
+
+	contents, err := convertClaudeMessagesToGeminiContents(messages, map[string]string{}, true)
+	require.NoError(t, err)
+	require.Len(t, contents, 1)
+	entry, ok := contents[0].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "user", entry["role"])
+	parts, ok := entry["parts"].([]any)
+	require.True(t, ok)
+	require.Len(t, parts, 2)
+}
+
+func TestAntigravityGatewayForward_RespectsOutputConfigEffortVariant(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{antigravityCompatSuccessResponse()}}
+	svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+	account := newAntigravityCompatAccount(AccountTypeOAuth)
+	mapping, ok := account.Credentials["model_mapping"].(map[string]any)
+	require.True(t, ok)
+	mapping["gemini-4-argon-low"] = "gemini-4-argon-low"
+	mapping["gemini-4-argon-high"] = "gemini-4-argon-high"
+
+	body := []byte(`{"model":"gemini-4-argon","max_tokens":4096,"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`)
+	c, recorder := newAntigravityCompatContext(http.MethodPost, "/antigravity/v1/messages", body)
+
+	result, err := svc.Forward(context.Background(), c, account, body, false)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Len(t, upstream.requestBodies, 1)
+	require.Equal(t, "gemini-4-argon-low", gjson.GetBytes(upstream.requestBodies[0], "model").String())
+	require.Equal(t, "gemini-4-argon-low", result.UpstreamModel)
+}

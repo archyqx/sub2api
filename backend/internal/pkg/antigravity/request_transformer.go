@@ -470,6 +470,11 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 			continue
 		}
 
+		if len(contents) > 0 && contents[len(contents)-1].Role == role {
+			contents[len(contents)-1].Parts = append(contents[len(contents)-1].Parts, parts...)
+			continue
+		}
+
 		contents = append(contents, GeminiContent{
 			Role:  role,
 			Parts: parts,
@@ -715,9 +720,38 @@ func isAntigravityOpusHighTierModel(model string) bool {
 		strings.HasPrefix(lower, "claude-opus-4-8")
 }
 
-// carbonThinkingConfig preserves the upstream default when no effort is specified.
-// https://aistudio.google.com/docs/whats-new-gemini-4-carbon
-func carbonThinkingConfig(req *ClaudeRequest, bareModel bool) *GeminiThinkingConfig {
+func gemini4ThinkingModelInfo(model string) (isGemini4 bool, bareModel bool, supportsXHigh bool) {
+	norm := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model)), "models/")
+	if !strings.HasPrefix(norm, "gemini-4-") {
+		return false, false, false
+	}
+	if strings.Contains(norm, "image") ||
+		strings.Contains(norm, "tts") ||
+		strings.Contains(norm, "embedding") ||
+		strings.Contains(norm, "audio") {
+		return false, false, false
+	}
+	isGemini4 = strings.HasPrefix(norm, "gemini-4-carbon") ||
+		strings.HasPrefix(norm, "gemini-4-argon") ||
+		strings.HasPrefix(norm, "gemini-4-hydrogen") ||
+		strings.HasPrefix(norm, "gemini-4-neon")
+	if !isGemini4 {
+		return false, false, false
+	}
+	supportsXHigh = strings.HasPrefix(norm, "gemini-4-hydrogen") || strings.HasPrefix(norm, "gemini-4-neon")
+	bareModel = true
+	for _, suffix := range []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-tiered"} {
+		if strings.HasSuffix(norm, suffix) {
+			bareModel = false
+			break
+		}
+	}
+	return true, bareModel, supportsXHigh
+}
+
+// gemini4ThinkingConfig maps Claude output_config.effort and thinking config to Gemini 4 thinkingLevel,
+// preserving the upstream default when no effort is specified and never emitting thinkingBudget: 0.
+func gemini4ThinkingConfig(req *ClaudeRequest, bareModel, supportsXHigh bool) *GeminiThinkingConfig {
 	cfg := &GeminiThinkingConfig{}
 	if req.Thinking != nil {
 		cfg.IncludeThoughts = req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive"
@@ -729,7 +763,13 @@ func carbonThinkingConfig(req *ClaudeRequest, bareModel bool) *GeminiThinkingCon
 				cfg.ThinkingLevel = "low"
 			case "medium":
 				cfg.ThinkingLevel = "medium"
-			case "high", "xhigh", "max":
+			case "xhigh":
+				if supportsXHigh {
+					cfg.ThinkingLevel = "xhigh"
+				} else {
+					cfg.ThinkingLevel = "high"
+				}
+			case "high", "max":
 				cfg.ThinkingLevel = "high"
 			}
 		}
@@ -770,16 +810,15 @@ func buildGenerationConfig(req *ClaudeRequest) *GeminiGenerationConfig {
 		config.MaxOutputTokens = req.MaxTokens
 	}
 
-	// Carbon accepts thinking levels rather than token budgets. Tiered IDs, when
-	// supplied by the account catalog, already select the level upstream.
-	carbonModel := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(req.Model)), "models/")
-	isCarbon := carbonModel == "gemini-4-carbon" || carbonModel == "gemini-4-carbon-low" || carbonModel == "gemini-4-carbon-medium" || carbonModel == "gemini-4-carbon-high"
-	if isCarbon {
-		config.ThinkingConfig = carbonThinkingConfig(req, carbonModel == "gemini-4-carbon")
+	// Gemini 4 models accept thinkingLevel rather than thinkingBudget. Tiered IDs
+	// already select the level upstream and must not repeat thinkingLevel.
+	isGemini4, bareGemini4, supportsXHigh := gemini4ThinkingModelInfo(req.Model)
+	if isGemini4 {
+		config.ThinkingConfig = gemini4ThinkingConfig(req, bareGemini4, supportsXHigh)
 	}
 
 	// Thinking 配置
-	if !isCarbon && req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive") {
+	if !isGemini4 && req.Thinking != nil && (req.Thinking.Type == "enabled" || req.Thinking.Type == "adaptive") {
 		config.ThinkingConfig = &GeminiThinkingConfig{
 			IncludeThoughts: true,
 		}
@@ -859,8 +898,12 @@ func hasClientFunctionTools(tools []ClaudeTool) bool {
 }
 
 func isWebSearchTool(tool ClaudeTool) bool {
-	if strings.HasPrefix(tool.Type, "web_search") || tool.Type == "google_search" {
+	toolType := strings.TrimSpace(tool.Type)
+	if strings.HasPrefix(toolType, "web_search") || toolType == "google_search" {
 		return true
+	}
+	if strings.EqualFold(toolType, "custom") || tool.InputSchema != nil || tool.Custom != nil || toolType != "" {
+		return false
 	}
 
 	name := strings.TrimSpace(tool.Name)
