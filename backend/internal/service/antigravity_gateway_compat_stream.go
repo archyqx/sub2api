@@ -337,20 +337,6 @@ func (s *AntigravityGatewayService) handleAntigravityCompatStream(
 	)
 }
 
-// handleAntigravityCompatStreamAfterHeaders starts reading an upstream HTTP 200 SSE
-// stream while keeping startTime for TTFT measurement and anchoring the pre-content
-// deadline at response-header arrival rather than request start.
-func (s *AntigravityGatewayService) handleAntigravityCompatStreamAfterHeaders(
-	c *gin.Context,
-	resp *http.Response,
-	startTime time.Time,
-	originalModel string,
-	adapter antigravityCompatStreamAdapter,
-	prefix string,
-) (*antigravityStreamResult, error) {
-	return s.handleAntigravityCompatStreamAfterHeadersWithBytes(c, resp, startTime, originalModel, adapter, prefix, 0)
-}
-
 func (s *AntigravityGatewayService) handleAntigravityCompatStreamAfterHeadersWithBytes(
 	c *gin.Context,
 	resp *http.Response,

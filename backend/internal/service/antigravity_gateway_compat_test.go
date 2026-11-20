@@ -733,7 +733,8 @@ func TestAntigravityCompatPreservesChatTokenLimit(t *testing.T) {
 			c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", body)
 			account := newAntigravityCompatAccount(AccountTypeOAuth)
 			if len(tt.extraMapping) > 0 {
-				mm := account.Credentials["model_mapping"].(map[string]any)
+				mm, ok := account.Credentials["model_mapping"].(map[string]any)
+				require.True(t, ok)
 				for k, v := range tt.extraMapping {
 					mm[k] = v
 				}
@@ -806,7 +807,8 @@ func TestAntigravityCompatResponsesFloorsGeminiReasoningMaxOutputTokens(t *testi
 			body := []byte(tt.body)
 			c, _ := newAntigravityCompatContext(http.MethodPost, "/v1/responses", body)
 			account := newAntigravityCompatAccount(AccountTypeOAuth)
-			mm := account.Credentials["model_mapping"].(map[string]any)
+			mm, ok := account.Credentials["model_mapping"].(map[string]any)
+			require.True(t, ok)
 			mm["gemini-4-hydrogen"] = "gemini-4-hydrogen"
 			mm["gemini-2.5-flash"] = "gemini-2.5-flash"
 

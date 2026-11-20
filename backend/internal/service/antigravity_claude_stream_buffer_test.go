@@ -210,7 +210,8 @@ func TestAntigravityClaudeStreamBuffer_PreContentKeepaliveGraceAndErrorFallback(
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/antigravity/v1/messages", nil)
-	flusher := c.Writer.(http.Flusher)
+	flusher, ok := c.Writer.(http.Flusher)
+	require.True(t, ok)
 	cw := newAntigravityClientWriter(c.Writer, flusher, "test")
 	cw.beforeFirstWrite = func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -556,7 +557,9 @@ func TestAntigravityCompatStreamSession_ConsumeTracksDiagnosticsWithoutPolluting
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	writer := newAntigravityClientWriter(c.Writer, c.Writer.(http.Flusher), "test")
+	flusher, ok := c.Writer.(http.Flusher)
+	require.True(t, ok)
+	writer := newAntigravityClientWriter(c.Writer, flusher, "test")
 
 	zeroSession := newAntigravityCompatStreamSession(
 		"gemini-4-hydrogen",
@@ -809,7 +812,8 @@ func TestAntigravityLongContextSilentEOFRetryPolicy(t *testing.T) {
 		}
 		svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
 		account := newAntigravityCompatAccount(AccountTypeOAuth)
-		mm := account.Credentials["model_mapping"].(map[string]any)
+		mm, ok := account.Credentials["model_mapping"].(map[string]any)
+		require.True(t, ok)
 		mm["gemini-4-hydrogen"] = "gemini-4-hydrogen"
 		largeText := strings.Repeat("b", 410*1024)
 		body := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[{"text":%q}]}]}`, largeText))
